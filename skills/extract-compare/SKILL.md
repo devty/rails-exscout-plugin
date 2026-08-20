@@ -30,8 +30,8 @@ ruby "${CLAUDE_PLUGIN_ROOT}/scripts/build_index.rb" --root . --out "$CACHE/index
 
 ## Step 2 — Analyze each domain
 
-For each name, run the analyzer in JSON mode and keep the `metrics`, `entanglement_score`
-and `seams`:
+For each name, run the analyzer in JSON mode and keep the `metrics`, `entanglement_score`,
+`max_severity` and `seams`:
 
 ```bash
 ruby "${CLAUDE_PLUGIN_ROOT}/scripts/analyze_domain.rb" \
@@ -50,8 +50,10 @@ Never let it place well by default.
 
 Order by ascending extraction cost, weighing in this order:
 
-1. **True cycles** — a domain with any genuine cycle ranks below one with none, regardless
-   of size. A cycle is preparatory work you cannot skip.
+1. **Blocking** (`max_severity == "blocker"`) — a domain with any genuine cycle ranks below
+   one with none, regardless of size. A cycle is preparatory work you cannot skip, and
+   `entanglement_score` deliberately does not encode it: rank on `max_severity` first, then
+   on score. A blocked 2.0 goes after a clean 6.0.
 2. **Facade leakage** (`exposed_constants`) — how many internals outsiders touch. This
    predicts API design effort better than raw edge count.
 3. **Inbound units** — how many callers need a client on cutover day.
@@ -70,8 +72,8 @@ Print a comparison table:
 ```
 DOMAIN       SCORE  FILES  IN   OUT  EXPOSED  CYCLES  VERDICT
 Notifications  2.1     14    9     4        3       0  Moderate
-Billing        4.1      4     8     9        2       1  Moderate
-Inventory      7.8     31    44   19       17       3  Very hard
+Billing        4.1      4     8     9        2       1  Moderate, BLOCKED
+Inventory      7.8     31    44   19       17       3  Very hard, BLOCKED
 ```
 
 Then, in prose:

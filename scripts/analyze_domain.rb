@@ -405,13 +405,41 @@ module ExtractScout
   end
 
   # ------------------------------------------------------------------- verdict
+  #
+  # Extractability is TWO readings, deliberately not collapsed into one number:
+  #
+  #   score(m)         MAGNITUDE -- how much work, 0-10.
+  #   max_severity(s)  BLOCKING  -- whether anything must break before the
+  #                                 boundary can even be drawn.
+  #
+  # They answer different questions, and a small domain can be badly blocked.
+  # Collapsing them loses exactly the fact an engineer acts on: an earlier build
+  # scored one true cycle at 1.1/10 and printed "Clean -- extractable as-is"
+  # directly above "[BLOCKER] Cycle", contradicting its own report.
+  #
+  # Keep the split. Magnitude saturates on purpose; blocking must never be
+  # smuggled back into the score to compensate.
 
   module Verdict
+    SEVERITY_RANK = { 'blocker' => 3, 'major' => 2, 'moderate' => 1 }.freeze
+
     module_function
 
-    # Composite 0-10. Each component saturates so one huge number cannot alone
-    # drive the whole score -- an extraction with 400 inbound edges but zero
-    # cycles is genuinely easier than one with 12 edges and three cycles.
+    # Highest severity among the ranked seams; nil when there are none.
+    def max_severity(seams)
+      present = Array(seams).map { |s| s['severity'] }.select { |s| SEVERITY_RANK.key?(s) }
+      return nil if present.empty?
+
+      present.max_by { |s| SEVERITY_RANK.fetch(s) }
+    end
+
+    def blocked?(seams)
+      max_severity(seams) == 'blocker'
+    end
+
+    # MAGNITUDE only. Each component saturates so no single large count drives
+    # the whole number -- 400 inbound edges is a lot of mechanical work, not an
+    # impossibility. Whether the split is BLOCKED is max_severity's job.
     def score(m)
       sat = ->(value, full) { [value.to_f / full, 1.0].min }
       composite =
@@ -424,12 +452,43 @@ module ExtractScout
       composite.round(1)
     end
 
-    def label(score)
+    # The volume reading of the score alone, with no blocking information.
+    def magnitude(score)
       case score
-      when 0...2.0  then 'Clean -- extractable as-is'
-      when 2.0...4.5 then 'Moderate -- a few seams to break first'
-      when 4.5...7.0 then 'Hard -- real preparatory work required'
-      else 'Very hard -- decompose further before attempting'
+      when 0...2.0   then 'Clean'
+      when 2.0...4.5 then 'Moderate'
+      when 4.5...7.0 then 'Hard'
+      else 'Very hard'
+      end
+    end
+
+    # The headline phrase after "ENTANGLEMENT: {score}/10 -- ".
+    #
+    # Blocking QUALIFIES magnitude rather than replacing it. A blocked domain may
+    # still be small and otherwise cheap; dropping the magnitude word hides that
+    # and turns every blocked domain into the same undifferentiated "Blocked".
+    # "Clean, but BLOCKED" is deliberately a little jarring -- the tension is the
+    # finding, not a wording problem to smooth away.
+    #
+    # nil severity is NOT a clean bill of health. It means the constant graph came
+    # back empty, while foreign keys, transactions, git co-change and runtime
+    # config were never examined at all. Say which surfaces are still unread
+    # rather than letting silence read as safety.
+    def verdict(score, max_severity)
+      mag = magnitude(score)
+      case max_severity
+      when 'blocker'
+        # "but" only reads as qualification while the magnitude sounds reassuring.
+        # "Very hard, but BLOCKED" implies a contrast that isn't there.
+        contrast = %w[Clean Moderate].include?(mag) ? 'but' : 'and'
+        "#{mag}, #{contrast} BLOCKED -- a seam must break before the boundary can be drawn"
+      when 'major'
+        "#{mag} -- preparatory work required before any code moves"
+      when 'moderate'
+        "#{mag} -- minor seams, mechanical to clear"
+      else
+        "#{mag} -- no seams in the constant graph; requires further " \
+        'investigation: schema FKs, transaction boundaries, git co-change, runtime config'
       end
     end
   end
@@ -447,11 +506,12 @@ module ExtractScout
     def text(report)
       m = report['metrics']
       score = Verdict.score(m)
+      severity = Verdict.max_severity(report['seams'])
       out = []
       out << "DOMAIN: #{report['domain']}"
       out << "Resolved to #{m['domain_files']} files (#{m['domain_loc']} LOC)"
       out << ''
-      out << "ENTANGLEMENT: #{score}/10 -- #{Verdict.label(score)}"
+      out << "ENTANGLEMENT: #{score}/10 -- #{Verdict.verdict(score, severity)}"
       out << ''
       out << format('  Inbound   %s  %d edges from %d units (%d files)',
                     bar(m['inbound_units'], 10), m['inbound_edges'], m['inbound_units'], m['inbound_files'])
@@ -514,7 +574,10 @@ if __FILE__ == $PROGRAM_NAME
 
   report = analyzer.analyze
   report['entanglement_score'] = ExtractScout::Verdict.score(report['metrics'])
-  report['verdict'] = ExtractScout::Verdict.label(report['entanglement_score'])
+  report['max_severity']       = ExtractScout::Verdict.max_severity(report['seams'])
+  report['verdict']            = ExtractScout::Verdict.verdict(
+    report['entanglement_score'], report['max_severity']
+  )
 
   puts opts[:format] == 'json' ? JSON.pretty_generate(report) : ExtractScout::Render.text(report)
 end

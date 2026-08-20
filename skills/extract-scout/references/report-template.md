@@ -7,7 +7,9 @@ order and keep "Not analyzed" — it is the report's honesty clause.
 
 # Extraction scout: {Domain}
 
-**Verdict: {score}/10 — {label}**
+**Verdict: {score}/10 — {verdict}**
+
+{If `max_severity` is `blocker`, the word BLOCKED must survive into whatever prose you write below. A reader who skims only this line must not come away thinking the domain is ready to move.}
 
 {One sentence a tech lead can repeat in a planning meeting. Name the single biggest
 obstacle, not a summary of everything.}

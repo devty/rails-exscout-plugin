@@ -41,7 +41,7 @@ boundary, the evidence, and the blind spots are all on the page.
 DOMAIN: Billing
 Resolved to 4 files (41 LOC)
 
-ENTANGLEMENT: 4.1/10 -- Moderate -- a few seams to break first
+ENTANGLEMENT: 4.1/10 -- Moderate, but BLOCKED -- a seam must break before the boundary can be drawn
 
   Inbound   #####.....  8 edges from 5 units (5 files)
   Outbound  #######...  9 edges to 8 units
@@ -231,11 +231,17 @@ what an association is and cannot drift apart.
 
 ## Tuning
 
-Two places encode judgment, both deliberately isolated in `scripts/analyze_domain.rb`:
+Three places encode judgment, all deliberately isolated in `scripts/analyze_domain.rb`:
 
 - **`SEAM_WEIGHTS`** — the ordering of what has to break first.
-- **`Verdict.score`** — the composite 0–10 headline. Each component saturates so no single
-  large number dominates: a domain with 400 inbound edges and no cycles is genuinely easier
-  to extract than one with 12 edges and three cycles.
+- **`Verdict.score`** — magnitude only: *how much* work, 0–10. Each component saturates so
+  no single large number dominates — 400 inbound edges is a lot of mechanical work, not an
+  impossibility.
+- **`Verdict.verdict`** — how magnitude and blocking combine into the headline.
+
+The score deliberately does **not** encode blocking. A domain with one true cycle can be
+small, cheap and still impossible to extract, so `max_severity` carries that separately and
+the headline reports both: `1.7/10 -- Clean, but BLOCKED`. Collapsing them is how an
+earlier build managed to print "Clean — extractable as-is" directly above `[BLOCKER]`.
 
 Adjust these to match how your team actually sequences migration work.
