@@ -231,7 +231,11 @@ module ExtractScout
       return true if j.negative?
 
       prev_type, prev_val = tokens[j][1], tokens[j][2]
-      return false if prev_type == :on_op && %w[. &. ::].include?(prev_val)
+      # Ripper lexes a plain `.` as :on_period, NOT :on_op. Matching only :on_op
+      # here silently let `obj.extend Foo` through as a mixin edge, which then
+      # inflated the shared_mixin seam with receiver calls that mix nothing in.
+      return false if prev_type == :on_period
+      return false if prev_type == :on_op && %w[&. ::].include?(prev_val)
       return false if prev_type == :on_symbeg
       return false if prev_type == :on_label
 

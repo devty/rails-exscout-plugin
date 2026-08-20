@@ -224,10 +224,38 @@ hooks/
 scripts/
   build_index.rb                  # Ripper constant index
   analyze_domain.rb               # boundary walk, seam ranking, scoring
+test/
+  run_all.rb                      # the whole suite
+  verdict_matrix.rb               # every (score, severity) headline in one table
 ```
 
 The hook `require`s `scripts/build_index.rb`, so it and the audit share one definition of
 what an association is and cannot drift apart.
+
+## Tests
+
+```bash
+ruby test/run_all.rb
+```
+
+No Gemfile: Minitest is a Ruby default gem, so the suite installs nothing — the same promise
+the analyzers make. Each test writes its fixture repo to a temp dir and throws it away, so
+there is no committed fixture to drift and no state carried between runs.
+
+Coverage is weighted toward the places where a wrong answer looks exactly like a confident
+one:
+
+- **Token walking and inflection** — a missed edge understates coupling, a phantom edge
+  overstates it, and both render identically in the report.
+- **Autoload roots** — `app/*/concerns` being a root in its own right is the difference
+  between `Auditable` and a constant nothing in the app references.
+- **Cycles vs inverse association pairs** — the false positive called out above, asserted
+  from both sides in one fixture.
+- **The hook's silence matrix** — every row of that table is a test. Silence is the
+  contract, not a preference.
+
+`ruby test/verdict_matrix.rb` prints every headline the report can produce and checks that a
+blocker stays legible at every magnitude.
 
 ## Tuning
 

@@ -12,12 +12,9 @@
 #
 #   ruby test/verdict_matrix.rb
 
-require 'json'
-
-root = File.expand_path('..', __dir__)
-src = File.read(File.join(root, 'scripts', 'analyze_domain.rb'))
-# Load the library without executing the CLI main block.
-eval(src.sub(/^if __FILE__ == \$PROGRAM_NAME.*/m, ''), TOPLEVEL_BINDING) # rubocop:disable Security/Eval
+# The script guards its CLI behind `if __FILE__ == $PROGRAM_NAME`, so requiring
+# it loads the library without running main.
+require File.join(File.expand_path('..', __dir__), 'scripts', 'analyze_domain')
 
 V = ExtractScout::Verdict
 
