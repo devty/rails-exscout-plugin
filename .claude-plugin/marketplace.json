@@ -1,0 +1,16 @@
+{
+  "name": "extract-scout-dev",
+  "description": "Local development marketplace for the extract-scout plugin.",
+  "owner": {
+    "name": "Tyler Singletary",
+    "email": "devtysingletary@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "extract-scout",
+      "description": "Scouts a Rails monolith for extractability: how entangled a domain is and which seams must break first.",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}

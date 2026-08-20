@@ -1,0 +1,8 @@
+# Local plugin install state - contains machine-specific absolute paths
+.claude/settings.local.json
+
+# Index cache written by /extract-scout when the repo has no tmp/
+.extract-scout/index.json
+
+# Rails apps gitignore tmp/ already; this is here for non-Rails checkouts
+tmp/extract-scout/

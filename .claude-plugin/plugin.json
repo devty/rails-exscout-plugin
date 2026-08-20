@@ -1,0 +1,11 @@
+{
+  "name": "extract-scout",
+  "version": "0.1.0",
+  "description": "Scouts a Rails monolith for extractability. Name a domain and get an evidence-backed report of how entangled it is and which seams have to break first.",
+  "author": {
+    "name": "Tyler Singletary",
+    "email": "devtysingletary@gmail.com"
+  },
+  "keywords": ["rails", "ruby", "refactoring", "monolith", "architecture", "coupling", "extraction"],
+  "license": "MIT"
+}
