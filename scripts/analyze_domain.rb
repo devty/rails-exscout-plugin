@@ -113,7 +113,8 @@ module ExtractScout
     # is ONE relationship written from both ends -- the standard idiom -- not a
     # dependency cycle. Calling that a blocker is the false positive that makes
     # engineers stop trusting the report.
-    BEHAVIORAL_KINDS = %w[reference mixin superclass dsl_string delegation].freeze
+    BEHAVIORAL_KINDS = %w[reference mixin superclass dsl_string delegation
+                          polymorphic_ref].freeze
 
     def initialize(index, domain, extra_consts: [], extra_files: [])
       @index = index
@@ -190,12 +191,25 @@ module ExtractScout
       # directions carry behavioral edges. Association-only bidirectionality is
       # an inverse pair and belongs with the association seam instead.
       bidirectional = (inbound_units.keys & outbound_units.keys).sort
-      cycle_units, assoc_pair_units = bidirectional.partition do |unit|
+      behavioral_both, assoc_pair_units = bidirectional.partition do |unit|
         behavioral?(inbound_units[unit]) && behavioral?(outbound_units[unit])
+      end
+
+      # Behaviour in both directions is necessary but not sufficient. A unit is
+      # a whole namespace, so `Ledger::Report` calling in and `Ledger::Secret`
+      # being called back collapses into one bidirectional unit -- while nothing
+      # says the two Ledger files depend on each other at all. Only when the
+      # same file appears on both sides is a cycle demonstrated.
+      cycle_units, namespace_pair_units = behavioral_both.partition do |unit|
+        files_both_ways?(inbound_units[unit], outbound_units[unit])
       end
 
       # Distinct domain constants reached from outside = how leaky the facade is.
       exposed = inbound.map(&:to_const).uniq.sort
+
+      poly = (inbound + outbound).select { |c| c.kind == 'polymorphic' }
+      poly_refs = (inbound + outbound).select { |c| c.kind == 'polymorphic_ref' }
+      unbounded = unbounded_interfaces
 
       {
         'domain'  => @domain,
@@ -218,23 +232,38 @@ module ExtractScout
           'inbound_files'       => inbound.map(&:from_file).uniq.size,
           'exposed_constants'   => exposed.size,
           'cycle_units'         => cycle_units.size,
+          'namespace_pair_units' => namespace_pair_units.size,
           'assoc_pair_units'    => assoc_pair_units.size,
           'boundary_assocs'     => (inbound + outbound).count { |c| ASSOCIATION_KINDS.include?(c.kind) },
           'string_couplings'    => (inbound + outbound).count { |c| c.kind == 'dsl_string' },
+          'polymorphic_edges'   => poly.size,
+          'polymorphic_string_refs' => poly_refs.size,
+          'polymorphic_unbounded' => unbounded.size,
           'cohesion_ratio'      => cohesion(internal, inbound.size + outbound.size)
         },
         'exposed_constants' => exposed,
         'cycles'   => cycle_units.map { |u| cycle_detail(u, inbound_units, outbound_units) },
+        'namespace_pairs' => namespace_pair_units.map { |u| cycle_detail(u, inbound_units, outbound_units) },
         'inverse_association_pairs' => assoc_pair_units,
         'inbound'  => summarize_units(inbound_units),
         'outbound' => summarize_units(outbound_units),
         'seams'    => rank_seams(inbound, outbound, inbound_units, outbound_units,
-                                 cycle_units, assoc_pair_units, exposed)
+                                 cycle_units, assoc_pair_units, exposed, poly, unbounded,
+                                 namespace_pair_units, poly_refs)
       }
     end
 
     def behavioral?(crossings)
       crossings.any? { |c| BEHAVIORAL_KINDS.include?(c.kind) }
+    end
+
+    # The external files that call in, versus the external files that get called
+    # back. An intersection means one file is on both sides -- a demonstrated
+    # cycle. Disjoint sets mean the namespace, not any file, is bidirectional.
+    def files_both_ways?(inbound, outbound)
+      callers = inbound.map(&:from_file).to_set
+      callees = outbound.map(&:to_file).to_set
+      callers.intersect?(callees)
     end
 
     def plural(count, singular, plural_form = nil)
@@ -288,8 +317,14 @@ module ExtractScout
     #
     # Weights live in one place on purpose -- see SEAM_WEIGHTS below.
 
+    # Crossing associations per domain file at which the volume stops being
+    # ordinary Rails and starts being a project.
+    ASSOC_MAJOR_PER_FILE = 5
+
     SEAM_WEIGHTS = {
       'cycle'            => 100,
+      'polymorphic'      => 90,
+      'namespace_pair'   => 65,
       'facade_leak'      => 60,
       'boundary_assoc'   => 45,
       'string_coupling'  => 40,
@@ -298,9 +333,28 @@ module ExtractScout
       'outbound_dep'     => 20
     }.freeze
 
+    # A polymorphic interface declared inside the domain that no file in the
+    # repo implements. It produces no edges at all, so counting only crossings
+    # would make the least bounded case the quietest one in the report.
+    def unbounded_interfaces
+      @domain_files.flat_map do |rel|
+        meta = @index['files'][rel] || {}
+        implemented = meta.fetch('refs', []).select { |r| r['kind'] == 'polymorphic' }
+                          .map { |r| r['line'] }.to_set
+        meta.fetch('polymorphic', []).reject { |d| implemented.include?(d['line']) }
+            .map do |d|
+              { 'at' => "#{rel}:#{d['line']}", 'from' => meta['primary_const'],
+                'to' => ":#{d['name']} (no implementor in this repo)", 'kind' => 'polymorphic' }
+            end
+      end
+    end
+
     def rank_seams(inbound, outbound, inbound_units, outbound_units,
-                   cycle_units, assoc_pair_units, exposed)
+                   cycle_units, assoc_pair_units, exposed, poly, unbounded,
+                   namespace_pair_units, poly_refs)
       seams = []
+      poly_seam = polymorphic_seam(poly, unbounded, poly_refs)
+      seams << poly_seam if poly_seam
 
       cycle_units.each do |unit|
         into = inbound_units[unit].size
@@ -313,6 +367,25 @@ module ExtractScout
           'break_with' => 'Invert one direction: dependency injection, a domain event, or a ' \
                           'shared interface both sides depend on.',
           'score' => SEAM_WEIGHTS['cycle'] + into + outof,
+          'citations' => (inbound_units[unit] + outbound_units[unit]).first(8).map { |c| cite(c) }
+        }
+      end
+
+      namespace_pair_units.each do |unit|
+        into = inbound_units[unit].size
+        outof = outbound_units[unit].size
+        seams << {
+          'type' => 'namespace_pair', 'severity' => 'major',
+          'title' => "Namespace pair: #{@domain} <-> #{unit} (not a file-level cycle)",
+          'why' => "#{unit} calls into #{@domain} (#{into} #{plural(into, 'edge')}) and #{@domain} " \
+                   "calls back into #{unit} (#{outof} #{plural(outof, 'edge')}) -- but through " \
+                   'disjoint files. No file is on both sides, so nothing here demonstrates a ' \
+                   'cycle; the namespace is bidirectional, not any pair of files. Real work, ' \
+                   'not a precondition.',
+          'break_with' => "Confirm the #{unit} files involved do not depend on each other. If they " \
+                          'do, this is a cycle and must be inverted; if they do not, split the ' \
+                          'namespace so the direction is visible in the structure.',
+          'score' => SEAM_WEIGHTS['namespace_pair'] + into + outof,
           'citations' => (inbound_units[unit] + outbound_units[unit]).first(8).map { |c| cite(c) }
         }
       end
@@ -341,12 +414,21 @@ module ExtractScout
           else
             ''
           end
+        # Severity scales with how far past a normal model this is. A typical
+        # Rails model declares two to four associations, so five or more
+        # crossings per file is genuinely above the norm, and below that it is
+        # ordinary Rails. Never a blocker: an association crossing is work to
+        # do, not a precondition for drawing the boundary at all.
+        per_file = assoc.size.to_f / [@domain_files.size, 1].max
         seams << {
-          'type' => 'boundary_assoc', 'severity' => 'major',
+          'type' => 'boundary_assoc',
+          'severity' => per_file >= ASSOC_MAJOR_PER_FILE ? 'major' : 'moderate',
           'title' => "#{assoc.size} ActiveRecord #{plural(assoc.size, 'association')} " \
                      "#{assoc.size == 1 ? 'crosses' : 'cross'} the boundary",
           'why' => 'Each implies a join and almost always a foreign key. After extraction ' \
-                   'these cannot be traversed in SQL -- they become remote calls or denormalized ids.' + pair_note,
+                   'these cannot be traversed in SQL -- they become remote calls or denormalized ' \
+                   "ids. That is #{format('%.1f', per_file)} per domain file; " \
+                   "#{ASSOC_MAJOR_PER_FILE}+ is where this stops being ordinary Rails." + pair_note,
           'break_with' => 'Replace traversal with an explicit id column plus a lookup at the ' \
                           'seam. Confirm the FK in schema.rb -- schema analysis is out of scope here.',
           'score' => SEAM_WEIGHTS['boundary_assoc'] + assoc.size * 3,
@@ -401,6 +483,56 @@ module ExtractScout
       end
 
       seams.sort_by { |s| -s['score'] }
+    end
+
+    # Ranked just below a cycle. A cycle stops you drawing the boundary at all;
+    # a polymorphic association lets you draw it and then cannot survive it --
+    # no foreign key, no join, and a target set the type column decides at
+    # runtime. Both are preconditions, not volume.
+    def polymorphic_seam(poly, unbounded, poly_refs)
+      return nil if poly.empty? && unbounded.empty? && poly_refs.empty?
+
+      titles = []
+      if poly.any?
+        titles << "#{poly.size} polymorphic #{plural(poly.size, 'association')} " \
+                  "#{poly.size == 1 ? 'crosses' : 'cross'} the boundary"
+      end
+      if unbounded.any?
+        titles << "#{unbounded.size} declared #{plural(unbounded.size, 'interface')} " \
+                  "#{unbounded.size == 1 ? 'has' : 'have'} no implementor in this repo"
+      end
+      if poly_refs.any?
+        titles << "#{poly_refs.size} #{plural(poly_refs.size, 'place')} " \
+                  "#{poly_refs.size == 1 ? 'compares' : 'compare'} the type column as a bare string"
+      end
+
+      why = +'A polymorphic association is a class name stored as a string, with no foreign key. ' \
+             'The database cannot enforce it and no join can traverse it once the sides are apart. '
+      why += "Concrete targets found: #{poly.map(&:to_const).uniq.sort.join(', ')}. " if poly.any?
+      if unbounded.any?
+        why += 'The unbounded ones cannot be enumerated statically at all -- any model may be ' \
+               'stored in the type column, including ones added after this report. '
+      end
+      if poly_refs.any?
+        why += 'The class names are also written out as string literals at the call sites below, ' \
+               'where no compiler, rename or refactoring tool can see them -- renaming a model ' \
+               'stops the match silently rather than failing.'
+      end
+
+      {
+        'type' => 'polymorphic',
+        'severity' => poly.any? ? 'blocker' : 'major',
+        'title' => titles.join('; '),
+        'why' => why,
+        'break_with' => 'Replace the polymorphic association with one explicit association per ' \
+                        'concrete type, or an id the extracted service owns. Audit every string ' \
+                        'comparison against the type column first -- renaming a model silently ' \
+                        'stops matching instead of failing.',
+        'score' => SEAM_WEIGHTS['polymorphic'] + poly.size * 3 + unbounded.size * 5 +
+                   poly_refs.size * 2,
+        'citations' => poly.first(6).map { |c| cite(c) } + unbounded.first(3) +
+                       poly_refs.first(6).map { |c| cite(c) }
+      }
     end
   end
 

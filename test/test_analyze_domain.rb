@@ -44,6 +44,43 @@ FIXTURE = {
   RB
 }.freeze
 
+# Search::Entry points at an open set via `record`, implemented by Catalog.
+# Search::Orphan declares an interface nobody implements -- unbounded, which is
+# a worse finding than a bounded one and must not read as clean.
+POLY_FIXTURE = {
+  'app/models/application_record.rb' => "class ApplicationRecord\nend\n",
+  'app/models/search/entry.rb' => <<~RB,
+    module Search
+      class Entry < ApplicationRecord
+        belongs_to :record, polymorphic: true
+      end
+    end
+  RB
+  'app/models/search/orphan.rb' => <<~RB,
+    module Search
+      class Orphan < ApplicationRecord
+        belongs_to :owner, polymorphic: true
+      end
+    end
+  RB
+  'app/models/catalog/product.rb' => <<~RB,
+    module Catalog
+      class Product < ApplicationRecord
+        has_one :entry, as: :record, class_name: 'Search::Entry'
+      end
+    end
+  RB
+  'lib/search/query.rb' => <<~RB
+    module Search
+      class Query
+        def run
+          Entry.where(record_type: 'Catalog::Product')
+        end
+      end
+    end
+  RB
+}.freeze
+
 class TestAnalyzeDomain < Minitest::Test
   include FixtureRepo
 
@@ -83,6 +120,163 @@ class TestAnalyzeDomain < Minitest::Test
       r = analyze(dir, 'Billing', extra_consts: ['Order'])
       assert_includes r['files'], 'app/models/order.rb'
     end
+  end
+
+  # ------------------------------------------------------------- polymorphic
+
+  def with_search
+    with_repo(POLY_FIXTURE) { |dir| yield analyze(dir, 'Search') }
+  end
+
+  def test_polymorphic_crossings_are_counted
+    with_search { |r| assert_equal 1, r['metrics']['polymorphic_edges'] }
+  end
+
+  def test_polymorphic_crossing_is_a_blocker
+    with_search do |r|
+      seam = r['seams'].find { |x| x['type'] == 'polymorphic' }
+      refute_nil seam
+      assert_equal 'blocker', seam['severity']
+    end
+  end
+
+  # The discriminator has no foreign key, so the pair is not a cycle -- the
+  # inverse-pair rule must keep holding for this new edge kind.
+  def test_polymorphic_pair_is_not_promoted_to_a_cycle
+    with_search { |r| assert_empty r['cycles'] }
+  end
+
+  # An interface nobody implements produces no edges. Counting only edges would
+  # make the least bounded case the quietest one.
+  def test_unbounded_polymorphic_interface_is_reported
+    with_search { |r| assert_equal 1, r['metrics']['polymorphic_unbounded'] }
+  end
+
+  # Catalog's `has_one :entry` is a genuine association crossing and still
+  # counts. The polymorphic edge back must not be counted a second time.
+  # The discriminator comparison and the association are one problem. Reporting
+  # them in two places -- a blocker seam and a generic string coupling -- made
+  # the string half read as unrelated boilerplate. (D2, loose end)
+  def test_discriminator_strings_are_counted_with_the_polymorphic_seam
+    with_search { |r| assert_equal 1, r['metrics']['polymorphic_string_refs'] }
+  end
+
+  def test_discriminator_strings_are_not_counted_as_string_couplings
+    with_search { |r| assert_equal 0, r['metrics']['string_couplings'] }
+  end
+
+  def test_polymorphic_edges_do_not_inflate_the_association_count
+    with_search { |r| assert_equal 1, r['metrics']['boundary_assocs'] }
+  end
+
+  def test_polymorphic_seam_cites_the_declaration
+    with_search do |r|
+      seam = r['seams'].find { |x| x['type'] == 'polymorphic' }
+      assert(seam['citations'].any? { |c| c['at'].include?('search/entry.rb') })
+    end
+  end
+
+  # ------------------------------------------------------- association volume
+  #
+  # `boundary_assoc` was hardcoded `major`, so it fired at the same severity for
+  # a model with three associations and one with forty-three. On a Rails app
+  # every model crosses a boundary somewhere, which pinned max_severity at
+  # `major` for 31 of 34 domains and made the axis carry no signal. (D3)
+
+  def test_a_few_crossing_associations_are_moderate_not_major
+    with_billing do |r|
+      seam = r['seams'].find { |x| x['type'] == 'boundary_assoc' }
+      refute_nil seam
+      assert_equal 'moderate', seam['severity']
+    end
+  end
+
+  def test_many_crossing_associations_per_file_are_major
+    targets = %w[shipment customer coupon refund dispute payout ledger adjustment statement]
+    # The targets must exist, or the associations resolve to nothing and never
+    # cross -- the same silent drop D1 and D6 were about.
+    models = targets.to_h do |t|
+      ["app/models/#{t}.rb", "class #{t.capitalize} < ApplicationRecord\nend\n"]
+    end
+    invoice = "module Billing\n  class Invoice < ApplicationRecord\n" +
+              targets.map { |t| "    belongs_to :#{t}\n" }.join +
+              "  end\nend\n"
+
+    with_repo(FIXTURE.merge(models).merge('app/models/billing/invoice.rb' => invoice)) do |dir|
+      r = analyze(dir, 'Billing')
+      assert_operator r['metrics']['boundary_assocs'], :>=, 9
+      seam = r['seams'].find { |x| x['type'] == 'boundary_assoc' }
+      assert_equal 'major', seam['severity']
+    end
+  end
+
+  # An association crossing is work, never a precondition. Nothing about
+  # volume should ever make it a blocker.
+  def test_association_volume_is_never_a_blocker
+    with_billing do |r|
+      severities = r['seams'].select { |x| x['type'] == 'boundary_assoc' }.map { |x| x['severity'] }
+      refute_includes severities, 'blocker'
+    end
+  end
+
+  # ------------------------------------------------ namespace-level pseudo-cycle
+
+  # Ledger:: has edges both ways, but *through disjoint files*: Ledger::Report
+  # reads the domain, and the domain calls Ledger::Secret. Nothing shows the two
+  # Ledger files depend on each other, so this is not a cycle at file
+  # granularity -- collapsing a namespace into one unit only makes it look like
+  # one. This was the sweep's only reported blocker, and it was wrong. (D4)
+  PSEUDO_CYCLE = {
+    'app/models/application_record.rb' => "class ApplicationRecord\nend\n",
+    'app/models/vault/key.rb' => <<~RB,
+      module Vault
+        class Key < ApplicationRecord
+          def rotate
+            Ledger::Secret.generate
+          end
+        end
+      end
+    RB
+    'lib/ledger/report.rb' => <<~RB,
+      module Ledger
+        class Report
+          def run
+            Vault::Key.find(1)
+          end
+        end
+      end
+    RB
+    'lib/ledger/secret.rb' => <<~RB
+      module Ledger
+        module Secret
+          def self.generate = 'x'
+        end
+      end
+    RB
+  }.freeze
+
+  def with_vault
+    with_repo(PSEUDO_CYCLE) { |dir| yield analyze(dir, 'Vault') }
+  end
+
+  def test_bidirectional_namespace_through_disjoint_files_is_not_a_cycle
+    with_vault do |r|
+      assert_equal 0, r['metrics']['cycle_units']
+      assert_empty r['cycles']
+    end
+  end
+
+  def test_disjoint_namespace_pair_is_reported_but_not_as_a_blocker
+    with_vault do |r|
+      seam = r['seams'].find { |x| x['type'] == 'namespace_pair' }
+      refute_nil seam
+      assert_equal 'major', seam['severity']
+      assert_includes seam['why'], 'disjoint'
+    end
+  end
+
+  def test_disjoint_namespace_pair_is_counted_separately
+    with_vault { |r| assert_equal 1, r['metrics']['namespace_pair_units'] }
   end
 
   # --------------------------------------------------- cycles vs inverse pairs

@@ -41,4 +41,11 @@ module FixtureRepo
   def consts_for(source)
     refs_for(source).map(&:const)
   end
+
+  # Constants recorded on one specific line. Multi-line macros mean a whole-file
+  # assertion can be satisfied by a neighbouring declaration, which hides the
+  # very edge under test.
+  def consts_on_line(source, line)
+    refs_for(source).select { |r| r.line == line }.map(&:const)
+  end
 end
