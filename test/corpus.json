@@ -1,0 +1,23 @@
+{
+  "comment": [
+    "Real Rails apps with recorded resolution baselines. Not run by test/run_all.rb --",
+    "that suite is hermetic and must stay fast. Run this deliberately:",
+    "  EXTRACT_SCOUT_CORPUS=~/corpus ruby test/corpus.rb",
+    "Each entry is pinned to a ref so a baseline means something. Re-pin and re-measure",
+    "together, never separately."
+  ],
+  "repos": [
+    {
+      "name": "docuseal",
+      "clone": "https://github.com/docusealco/docuseal",
+      "ref": "004a22c1",
+      "measured_at": "2026-08-21",
+      "notes": "Rails 7, 304 files, 34 models. The repo D1-D6 were found in, so its numbers are the weakest evidence the fixes generalise -- it is a regression guard, not a validation set.",
+      "expect": {
+        "files_indexed_min": 250,
+        "association_total_min": 120,
+        "association_rate_min": 0.90
+      }
+    }
+  ]
+}

@@ -685,6 +685,80 @@ module ExtractScout
     end
   end
 
+  # ---------------------------------------------------------------- diagnostics
+  #
+  # The eval that generalises without hand-labelled ground truth.
+  #
+  # D1 -- class_name: read only on the macro's own physical line -- survived the
+  # entire life of the tool with a green suite, because a unit test asserts the
+  # parser does what it was written to do, and D1 was a shape the fixtures did
+  # not contain. No amount of the same kind of test would have found it.
+  #
+  # But it left a signature. A misparse fabricates a constant, and a fabricated
+  # constant resolves to nothing. So "what fraction of association references
+  # name a constant this repo actually defines" is a correctness proxy that needs
+  # no labels and runs on any repo. On DocuSeal that number was 84.7% while every
+  # test was green.
+  #
+  # Deliberate non-resolution is excluded rather than counted as failure:
+  # ubiquitous base classes resolve to nil by design, and counting them would
+  # make every healthy repo look broken.
+
+  # Associations name models in this repo, so they should almost all resolve.
+  # A handful legitimately will not -- STI, gem-provided models, an interface
+  # nobody implements -- so the floor is not 100%.
+  ASSOC_RESOLUTION_FLOOR = 0.9
+
+  module_function
+
+  def diagnose(index, floor: ASSOC_RESOLUTION_FLOOR)
+    resolver = ConstantResolver.new(index)
+    ubiquitous = Set.new(index['ubiquitous'])
+    by_kind = Hash.new { |h, k| h[k] = { 'total' => 0, 'ubiquitous' => 0, 'resolved' => 0, 'examples' => [] } }
+
+    index['files'].each do |rel, meta|
+      const = meta['primary_const']
+      from_ns = const&.include?('::') ? const.split('::')[0..-2].join('::') : ''
+
+      meta['refs'].each do |ref|
+        bucket = by_kind[ref['kind']]
+        bucket['total'] += 1
+
+        if ubiquitous.include?(ref['const'])
+          bucket['ubiquitous'] += 1
+          next
+        end
+
+        if resolver.resolve(ref['const'], from_ns)
+          bucket['resolved'] += 1
+        elsif bucket['examples'].size < 10
+          bucket['examples'] << { 'at' => "#{rel}:#{ref['line']}", 'const' => ref['const'] }
+        end
+      end
+    end
+
+    by_kind.each_value do |b|
+      expected = b['total'] - b['ubiquitous']
+      b['unresolved'] = expected - b['resolved']
+      b['rate'] = expected.zero? ? 1.0 : (b['resolved'].to_f / expected).round(3)
+    end
+
+    warnings = []
+    assoc = by_kind['association']
+    if assoc && (assoc['total'] - assoc['ubiquitous']).positive? && assoc['rate'] < floor
+      warnings << "association resolution #{(assoc['rate'] * 100).round}% is below the " \
+                  "#{(floor * 100).round}% floor -- #{assoc['unresolved']} of " \
+                  "#{assoc['total'] - assoc['ubiquitous']} associations name a constant this repo " \
+                  'does not define. That is the signature of a parser defect, not of coupling.'
+    end
+
+    {
+      'files_indexed' => (index['stats'] || {})['files_indexed'],
+      'by_kind' => by_kind,
+      'warnings' => warnings
+    }
+  end
+
   # -------------------------------------------------------------------- render
 
   module Render
@@ -721,6 +795,35 @@ module ExtractScout
       out << '  - transaction boundaries spanning the seam'
       out << '  - git co-change (temporal) coupling'
       out << '  - runtime config: env vars, feature flags, queues, cron'
+      out.join("\n")
+    end
+
+    def diagnostics(d)
+      out = []
+      out << "RESOLUTION DIAGNOSTICS  (#{d['files_indexed'] || '?'} files indexed)"
+      out << ''
+      out << format('  %-14s %6s %6s %9s %11s %6s',
+                    'KIND', 'TOTAL', 'UBIQ', 'RESOLVED', 'UNRESOLVED', 'RATE')
+      d['by_kind'].sort_by { |k, _| k }.each do |kind, b|
+        out << format('  %-14s %6d %6d %9d %11d %5d%%',
+                      kind, b['total'], b['ubiquitous'], b['resolved'], b['unresolved'],
+                      (b['rate'] * 100).round)
+      end
+      out << ''
+      if d['warnings'].empty?
+        out << '  ok: no kind is below its resolution floor'
+      else
+        out << '  WARNINGS'
+        d['warnings'].each { |w| out << "    - #{w}" }
+      end
+      examples = d['by_kind'].flat_map { |kind, b| b['examples'].map { |e| [kind, e] } }
+      unless examples.empty?
+        out << ''
+        out << '  UNRESOLVED EXAMPLES (each is a constant no file in this repo defines)'
+        examples.first(15).each do |kind, e|
+          out << format('    %-40s %-12s -> %s', e['at'], kind, e['const'])
+        end
+      end
       out.join("\n")
     end
 
@@ -782,6 +885,7 @@ if __FILE__ == $PROGRAM_NAME
     o.on('--domains-from PATH', 'File of domain names, one per line') { |v| opts[:domains_from] = v }
     o.on('--all', 'Every namespace in the index, or every top-level unit if it has none') { opts[:all] = true }
     o.on('--summary', 'Rank the domains in one table instead of reporting each in full') { opts[:summary] = true }
+    o.on('--diagnose', 'Report constant-resolution rates for the whole index and exit') { opts[:diagnose] = true }
     o.on('--extra-const NAME', 'Additional constant in this domain (repeatable)') { |v| opts[:extra_consts] << v }
     o.on('--extra-file PATH', 'Additional file in this domain (repeatable)') { |v| opts[:extra_files] << v }
     o.on('--format FMT', 'text (default) or json') { |v| opts[:format] = v }
@@ -791,6 +895,12 @@ if __FILE__ == $PROGRAM_NAME
   abort 'error: --index is required' unless opts[:index]
 
   index = JSON.parse(File.read(opts[:index]))
+
+  if opts[:diagnose]
+    d = ExtractScout.diagnose(index)
+    puts opts[:format] == 'json' ? JSON.pretty_generate(d) : ExtractScout::Render.diagnostics(d)
+    exit(d['warnings'].empty? ? 0 : 1)
+  end
 
   domains = opts[:domains].dup
   if opts[:domains_from]

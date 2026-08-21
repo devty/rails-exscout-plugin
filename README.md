@@ -338,6 +338,44 @@ one:
 `ruby test/verdict_matrix.rb` prints every headline the report can produce and checks that a
 blocker stays legible at every magnitude.
 
+### The check that finds what unit tests cannot
+
+Every one of the six defects found in the DocuSeal sweep passed the whole suite, because a
+unit test asserts the analyzer does what it was written to do and each defect was a shape the
+fixtures did not contain. Synthetic tests cannot find the case nobody thought of.
+
+What they leave behind is a signature: a misparse fabricates a constant, and a fabricated
+constant resolves to nothing. That is measurable on any repo, with no hand-labelled ground
+truth at all.
+
+```bash
+ruby scripts/analyze_domain.rb --index index.json --diagnose
+```
+
+```
+RESOLUTION DIAGNOSTICS  (304 files indexed)
+
+  KIND            TOTAL   UBIQ  RESOLVED  UNRESOLVED   RATE
+  association       128      0       121           7    95%
+  ...
+
+  ok: no kind is below its resolution floor
+```
+
+Associations name models in the repo, so they should almost all resolve; the floor is 90%
+rather than 100% because STI, gem-provided models and unimplemented interfaces legitimately
+do not. It exits non-zero when a kind drops below its floor. On DocuSeal that number was
+**84.7% while every test was green** — it is the check that would have caught the worst defect
+the day it was written.
+
+`test/corpus.rb` runs those baselines against real Rails apps pinned in `test/corpus.json`. It
+clones nothing: it reports what is missing, prints the command to fetch it, and says how many
+repos it actually checked, so a skipped corpus never reads as a passing one.
+
+```bash
+EXTRACT_SCOUT_CORPUS=~/corpus ruby test/corpus.rb
+```
+
 ## Tuning
 
 Three places encode judgment, all deliberately isolated in `scripts/analyze_domain.rb`:

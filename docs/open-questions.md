@@ -12,6 +12,20 @@ Ordered roughly by how hard they are to answer well.
 
 ### 1. What is the false-positive rate, and is it measured anywhere?
 
+> **Partly resolved — the mechanism is in, the corpus is not.**
+>
+> `--diagnose` reports constant-resolution rates across the whole index and exits non-zero
+> when associations fall below a 90% floor. That is the generalising half of this question:
+> it needs no labels, runs on any repo, and on DocuSeal would have read 84.7% while the
+> whole suite was green. `test/corpus.rb` runs those baselines against pinned real apps and
+> reports what it skipped rather than passing silently.
+>
+> Still open, and it is the important half: `test/corpus.json` pins exactly one repo, and it
+> is the repo D1–D6 were found in. That makes it a regression guard, not a validation set.
+> A second and third app — ideally ones nobody has tuned against — is what would turn this
+> into evidence the fixes generalise. Adding one is: clone, pin the ref, run `--diagnose`,
+> hand-check the unresolved examples, record the baseline.
+
 Measured on this one repo, before the fixes: cycle detection **1 of 1 false**; `string_coupling`
 **8 of 22 false**; association edges **18 of 118 silently dropped**. After D1–D6: no known false
 positive, string refs 100% genuine, 7 deliberate drops.
