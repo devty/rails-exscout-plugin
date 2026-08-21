@@ -277,3 +277,76 @@ class TestHook < Minitest::Test
     end
   end
 end
+
+# A hook whose blanket rescue swallows an exception exits 0 -- identically to a
+# clean pass with nothing to say. That is the right call for constraint #1, but
+# it means a silently broken hook is a permanent no-op nobody ever notices.
+#
+# This is not theoretical: during the DocuSeal sweep a malformed payload made
+# JSON.parse raise, the rescue swallowed it, and the conclusion drawn was "the
+# hook does not fire on ordinary associations" -- the opposite of the truth.
+class TestHookDebug < Minitest::Test
+  include FixtureRepo
+
+  HOOK = File.join(ROOT, 'hooks', 'scripts', 'check_cross_domain.rb')
+
+  def fire_capturing_stderr(dir, payload, env = {})
+    out, err, = Open3.capture3({ 'CLAUDE_PROJECT_DIR' => dir }.merge(env),
+                               RbConfig.ruby, HOOK, stdin_data: payload)
+    [out, err]
+  end
+
+  def edit(path, old_string, new_string)
+    JSON.generate('tool_name' => 'Edit',
+                  'tool_input' => { 'file_path' => path,
+                                    'old_string' => old_string, 'new_string' => new_string })
+  end
+
+  def test_silence_is_silent_by_default
+    with_repo(TestHook::APP) do |dir|
+      _, err = fire_capturing_stderr(dir, edit('app/models/billing/invoice.rb', 'x', 'def t; end'))
+      assert_empty err.strip, 'the hook must say nothing on the hot path'
+    end
+  end
+
+  def test_debug_mode_names_the_exit_path
+    with_repo(TestHook::APP) do |dir|
+      _, err = fire_capturing_stderr(dir, edit('app/models/billing/invoice.rb', 'x', 'def t; end'),
+                                     'EXTRACT_SCOUT_HOOK' => 'debug')
+      refute_empty err.strip
+      assert_match(/no association macro/i, err)
+    end
+  end
+
+  # The exact failure from the sweep: corrupt JSON, swallowed, exit 0.
+  def test_debug_mode_surfaces_a_swallowed_exception
+    with_repo(TestHook::APP) do |dir|
+      _, err = fire_capturing_stderr(dir, '{ not json', 'EXTRACT_SCOUT_HOOK' => 'debug')
+      assert_match(/JSON|ParserError/i, err)
+    end
+  end
+
+  def test_debug_mode_still_exits_zero
+    with_repo(TestHook::APP) do |dir|
+      out, = fire_capturing_stderr(dir, '{ not json', 'EXTRACT_SCOUT_HOOK' => 'debug')
+      assert_empty out.strip
+    end
+  end
+
+  def test_off_still_wins_over_debug
+    with_repo(TestHook::APP) do |dir|
+      _, err = fire_capturing_stderr(dir, edit('app/models/billing/invoice.rb', 'x',
+                                               %(belongs_to :shipment, class_name: "Shipping::Shipment")),
+                                     'EXTRACT_SCOUT_HOOK' => 'off')
+      assert_empty err.strip
+    end
+  end
+
+  # Proves the hook can still fire, without the shell quoting that already
+  # produced one false "it does not work" conclusion.
+  def test_self_test_confirms_the_hook_can_fire
+    out, err, status = Open3.capture3(RbConfig.ruby, HOOK, '--self-test')
+    assert_predicate status, :success?, "self-test failed:\n#{out}\n#{err}"
+    assert_match(/ok/i, out)
+  end
+end

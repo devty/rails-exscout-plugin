@@ -205,6 +205,13 @@ does, quoting the absolute rather than only the delta.
 
 ### The blanket rescue is indistinguishable from success — demonstrated accidentally
 
+> **Resolved.** `EXTRACT_SCOUT_HOOK=debug` names every exit path on stderr and prints the
+> exception and backtrace the rescue swallowed; the hot path stays byte-for-byte silent by
+> default. `--self-test` builds a throwaway two-domain repo and confirms a warning still comes
+> out, constructing its own payload so the shell cannot mangle it the way it did the first
+> time. 6 tests in `test/test_hook.rb`, including a regression test for the exact corrupt-JSON
+> case that caused the original misdiagnosis.
+
 `rescue StandardError; exit 0` is the right call for constraint #1: a hook must never break the
 user's tools. But there is no observable difference between *"analyzed, nothing to say"* and
 *"crashed on line one."*

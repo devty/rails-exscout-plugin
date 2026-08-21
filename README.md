@@ -125,6 +125,32 @@ ambiguous case resolves to silence:
 Turn it off entirely with `EXTRACT_SCOUT_HOOK=off`, or exclude paths via an `ignore` glob
 list in `.extract-scout/domains.json`.
 
+### Knowing it still works
+
+Silence is the contract, which means a *broken* hook and a *quiet* one look identical: the
+blanket rescue that stops an analysis bug from breaking your tools also exits 0 on a crash.
+The parser is shared with `/extract-scout`, so a parser regression would degrade this hook to
+a permanent no-op with no signal at all.
+
+Two ways to check, neither of which requires noticing an absence:
+
+```bash
+ruby hooks/scripts/check_cross_domain.rb --self-test
+```
+
+Builds a throwaway two-domain repo, feeds itself a crossing association, and reports whether
+the warning came out. It constructs its own payload rather than documenting a shell one-liner
+— a shell mangling `\n` inside the JSON is what once produced a confident, wrong "the hook
+does not fire" conclusion.
+
+```bash
+EXTRACT_SCOUT_HOOK=debug
+```
+
+Names the exit path on stderr for every invocation — `no association macro in the added text`,
+`app/models/x.rb belongs to no identified domain`, or the exception and backtrace the rescue
+swallowed. Off by default and silent on the hot path.
+
 Cost, measured on macOS arm64 / Ruby 3.3 over 50 invocations each: **~53 ms** for an edit with
 no association — the common case — against a **~46 ms** floor for `ruby -e ''`. The hook's own
 work is the ~7 ms difference; everything else is interpreter startup, and no algorithmic change
