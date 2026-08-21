@@ -215,6 +215,16 @@ module ExtractScout
         'domain'  => @domain,
         'files'   => @domain_files.to_a.sort,
         'evidence' => @evidence,
+        # The denominator. Saturation constants are absolute -- 10 inbound units
+        # is 10 client adapters to write whether the repo has 34 models or 400 --
+        # so the score estimates WORK and travels across repos. What does not
+        # travel is reading it as a percentile: on a small app a mid score is an
+        # outlier, on a large one it is unremarkable. Carry the scale so the
+        # reader can tell which they are looking at.
+        'repo' => {
+          'files_indexed' => (@index['stats'] || {})['files_indexed'],
+          'constants'     => (@index['stats'] || {})['constants']
+        },
         'not_analyzed' => [
           'schema foreign keys / column-level sharing',
           'transaction boundaries spanning the seam',
@@ -625,6 +635,56 @@ module ExtractScout
     end
   end
 
+  # ----------------------------------------------------------------- portfolio
+  #
+  # A sweep over many domains is deterministic work -- resolve, score, rank --
+  # and it was being done by hand in the conversation: 34 JSON files aggregated
+  # with ad-hoc one-liners, re-derived every run, each pass a chance to
+  # transcribe a number wrong. It belongs in the script, where it is
+  # reproducible without a model.
+
+  module_function
+
+  # Every unit worth scouting in a portfolio pass.
+  #
+  # Namespaces are the real domains when an app has them. Most Rails apps have
+  # none, and coming back empty would be useless there -- so fall back to
+  # top-level constants, which are that app's de-facto units.
+  def candidate_domains(index)
+    namespaces = index['namespaces'].keys.reject { |n| n.include?('::') }
+    return namespaces.sort unless namespaces.empty?
+
+    index['constants'].keys.reject { |c| c.include?('::') }.sort
+  end
+
+  # The headline numbers for one domain. nil when the name resolves to nothing,
+  # so a caller can filter_map over a speculative list.
+  def summarize(index, domain, extra_consts: [], extra_files: [])
+    analyzer = Analyzer.new(index, domain, extra_consts: extra_consts, extra_files: extra_files)
+    return nil if analyzer.domain_files.empty?
+
+    report = analyzer.analyze
+    score = Verdict.score(report['metrics'])
+    severity = Verdict.max_severity(report['seams'])
+    {
+      'domain' => domain,
+      'entanglement_score' => score,
+      'max_severity' => severity,
+      'verdict' => Verdict.verdict(score, severity),
+      'metrics' => report['metrics'],
+      'seams' => report['seams'].map { |s| s.slice('type', 'severity', 'title') }
+    }
+  end
+
+  # Ascending extraction cost. Blocking is a precondition rather than a
+  # quantity, so it outranks magnitude outright: a blocked 2.0 goes after a
+  # clean 6.0. Domain name breaks ties so the order is stable across runs.
+  def rank(rows)
+    rows.sort_by do |r|
+      [r['max_severity'] == 'blocker' ? 1 : 0, r['entanglement_score'], r['domain']]
+    end
+  end
+
   # -------------------------------------------------------------------- render
 
   module Render
@@ -635,13 +695,44 @@ module ExtractScout
       ('#' * filled) + ('.' * (width - filled))
     end
 
+    # The portfolio table. Deliberately narrow enough to paste into a planning
+    # doc without reflowing -- the per-domain detail lives in the full reports.
+    def summary(rows)
+      return "No domains resolved -- nothing to rank.\n" if rows.empty?
+
+      out = []
+      out << format('%-22s %6s %6s %5s %5s %8s %7s  %s',
+                    'DOMAIN', 'SCORE', 'FILES', 'IN', 'OUT', 'EXPOSED', 'CYCLES', 'VERDICT')
+      rows.each do |r|
+        m = r['metrics']
+        headline = Verdict.magnitude(r['entanglement_score'])
+        headline += ', BLOCKED' if r['max_severity'] == 'blocker'
+        out << format('%-22s %6s %6d %5d %5d %8d %7d  %s',
+                      r['domain'], r['entanglement_score'], m['domain_files'],
+                      m['inbound_units'], m['outbound_units'], m['exposed_constants'],
+                      m['cycle_units'], headline)
+      end
+      out << ''
+      out << 'Ordered by ascending extraction cost. Blocking outranks size: a blocked 2.0'
+      out << 'goes after a clean 6.0, because a blocker is a precondition, not a quantity.'
+      out << ''
+      out << 'NOT ANALYZED (ranking on partial signal is still ranking on partial signal):'
+      out << '  - schema foreign keys / column-level sharing'
+      out << '  - transaction boundaries spanning the seam'
+      out << '  - git co-change (temporal) coupling'
+      out << '  - runtime config: env vars, feature flags, queues, cron'
+      out.join("\n")
+    end
+
     def text(report)
       m = report['metrics']
       score = Verdict.score(m)
       severity = Verdict.max_severity(report['seams'])
       out = []
       out << "DOMAIN: #{report['domain']}"
-      out << "Resolved to #{m['domain_files']} files (#{m['domain_loc']} LOC)"
+      indexed = (report['repo'] || {})['files_indexed']
+      scale = indexed ? " of #{indexed} indexed" : ''
+      out << "Resolved to #{m['domain_files']} files#{scale} (#{m['domain_loc']} LOC)"
       out << ''
       out << "ENTANGLEMENT: #{score}/10 -- #{Verdict.verdict(score, severity)}"
       out << ''
@@ -680,27 +771,64 @@ end
 # ------------------------------------------------------------------------ main
 
 if __FILE__ == $PROGRAM_NAME
-  opts = { format: 'text', extra_consts: [], extra_files: [] }
+  opts = { format: 'text', extra_consts: [], extra_files: [], domains: [] }
   OptionParser.new do |o|
-    o.banner = 'Usage: analyze_domain.rb --index PATH --domain NAME [options]'
+    o.banner = <<~BANNER
+      Usage: analyze_domain.rb --index PATH --domain NAME [options]
+             analyze_domain.rb --index PATH --summary --all
+    BANNER
     o.on('--index PATH', 'Index JSON from build_index.rb') { |v| opts[:index] = v }
-    o.on('--domain NAME', 'Domain name, e.g. Billing') { |v| opts[:domain] = v }
+    o.on('--domain NAME', 'Domain name, e.g. Billing (repeatable)') { |v| opts[:domains] << v }
+    o.on('--domains-from PATH', 'File of domain names, one per line') { |v| opts[:domains_from] = v }
+    o.on('--all', 'Every namespace in the index, or every top-level unit if it has none') { opts[:all] = true }
+    o.on('--summary', 'Rank the domains in one table instead of reporting each in full') { opts[:summary] = true }
     o.on('--extra-const NAME', 'Additional constant in this domain (repeatable)') { |v| opts[:extra_consts] << v }
     o.on('--extra-file PATH', 'Additional file in this domain (repeatable)') { |v| opts[:extra_files] << v }
     o.on('--format FMT', 'text (default) or json') { |v| opts[:format] = v }
     o.on('-h', '--help') { puts o; exit 0 }
   end.parse!
 
-  abort 'error: --index and --domain are required' unless opts[:index] && opts[:domain]
+  abort 'error: --index is required' unless opts[:index]
 
   index = JSON.parse(File.read(opts[:index]))
+
+  domains = opts[:domains].dup
+  if opts[:domains_from]
+    domains += File.readlines(opts[:domains_from]).map(&:strip).reject { |l| l.empty? || l.start_with?('#') }
+  end
+  selected_all = opts[:all] ? ExtractScout.candidate_domains(index) : []
+  domains = (domains + selected_all).uniq
+
+  # "--all is required" when --all was given sends the reader to fix the wrong
+  # thing. An empty selector and an empty result are different failures.
+  if domains.empty?
+    if opts[:all] || opts[:domains_from]
+      abort "error: no domains found. The index at #{opts[:index]} holds " \
+            "#{index['stats']['files_indexed']} files and #{index['stats']['constants']} constants " \
+            '-- rebuild it with build_index.rb --root <repo> if that looks wrong.'
+    end
+    abort 'error: --domain, --domains-from or --all is required'
+  end
+
+  if opts[:summary] || domains.size > 1
+    rows = ExtractScout.rank(domains.filter_map { |d| ExtractScout.summarize(index, d) })
+    missed = domains - rows.map { |r| r['domain'] }
+    # Silent truncation reads as "covered everything". Name what did not resolve.
+    warn "extract-scout: #{missed.size} of #{domains.size} names resolved to no files: " \
+         "#{missed.sort.join(', ')}" unless missed.empty?
+
+    puts opts[:format] == 'json' ? JSON.pretty_generate(rows) : ExtractScout::Render.summary(rows)
+    exit 0
+  end
+
+  domain = domains.first
   analyzer = ExtractScout::Analyzer.new(
-    index, opts[:domain],
+    index, domain,
     extra_consts: opts[:extra_consts], extra_files: opts[:extra_files]
   )
 
   if analyzer.domain_files.empty?
-    abort "error: '#{opts[:domain]}' matched no files. Try --extra-const/--extra-file, " \
+    abort "error: '#{domain}' matched no files. Try --extra-const/--extra-file, " \
           'or check that the domain name matches a namespace, constant or path segment.'
   end
 

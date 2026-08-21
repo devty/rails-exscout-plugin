@@ -63,6 +63,27 @@ WHAT HAS TO BREAK FIRST
 Seams are ordered by **what blocks what**, not by size. Two hundred one-directional call
 sites are tedious; one true cycle is a hard stop.
 
+### The portfolio view
+
+One domain at a time answers "how bad is Billing?". Ranking the whole repo answers the
+question teams actually argue about, and the script does the ranking itself — no model in the
+loop, reproducible run to run:
+
+```bash
+ruby scripts/analyze_domain.rb --index index.json --summary --all
+```
+
+```
+DOMAIN                  SCORE  FILES    IN   OUT  EXPOSED  CYCLES  VERDICT
+Shipping                  0.0      1     0     0        0       0  Clean
+Fulfillment               0.4      1     1     1        1       0  Clean
+Billing                   2.3      2     2     3        2       1  Moderate, BLOCKED
+```
+
+Ordered by ascending cost, with blocking ahead of size — a blocked 2.3 goes after a clean 6.0,
+because a blocker is a precondition rather than a quantity. `--all` takes every namespace in
+the repo, or every top-level unit in a repo that has none; `--domains-from` takes a list.
+
 ## Staying useful after the audit
 
 An audit is a snapshot. The `PostToolUse` hook is the part that keeps the boundary honest

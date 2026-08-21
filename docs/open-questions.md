@@ -45,6 +45,13 @@ through a model instructed to trust tool output.
 
 ### 3. Is the score comparable across repos, or only within one?
 
+> **Resolved as documentation, not code.** The constants are absolute on purpose — ten inbound
+> units is ten client adapters whether the repo has 34 models or 400 — so the score travels as an
+> *effort* estimate and does not travel as a *percentile*. Normalising by repo size was rejected:
+> it would change a domain's difficulty when someone adds unrelated models elsewhere. Reports now
+> print `N files of M indexed` so the denominator is visible, and the skill has a "Reading the
+> score" section. The 23-of-34-Clean cluster is re-read as accurate signal about a flat app.
+
 `Verdict.score` saturation constants are absolute: 3 cycle units, 12 exposed constants, 10 inbound
 units, 10 boundary associations, 12 outbound units, 5 string couplings.
 
@@ -80,6 +87,10 @@ D1 (see blind-spots #11).
 
 ### 5. Is the boundary between script and agent in the right place?
 
+> **Partly resolved.** The hardcoded severity prose is still frozen in `analyze_domain.rb` — see
+> the note at the end of this entry. What did move: the ranking arithmetic (Q6) and both agent
+> dispatch triggers (Q7, Q8).
+
 The split is mostly excellent and worth keeping as a reference design: **parsing and graph math are
 deterministic; boundary judgment and call-site interpretation are agents.** Ripper tokenizing is
 exactly what a model should not be doing, and "does `Invoice` belong to Billing" is exactly what a
@@ -99,6 +110,12 @@ citations turn out to be.
 
 ### 6. Why is the model doing arithmetic the script should own?
 
+> **Resolved.** `analyze_domain.rb` gained `--summary`, `--domains-from` and `--all`. It resolves,
+> scores and ranks a whole candidate set in one invocation and prints the table directly, with the
+> `NOT ANALYZED` clause attached. `--all` doubles as the portfolio view Q11 asks for. Ranking is
+> reproducible without a model, and names that resolve to nothing are reported rather than
+> silently dropped. 12 tests in `test/test_summary.rb`.
+
 The sweep produced 34 JSON files, aggregated with ad-hoc Ruby one-liners written in the conversation:
 sorting by score, grouping severity, computing hub/leaf tiers, building the markdown table. All
 deterministic, all re-derived from scratch, all consuming model context.
@@ -107,6 +124,11 @@ A `--summary` / `--domains-from` mode would move it into the script, make the ra
 without a model, and remove a class of transcription error. See postmortem § Ergonomics.
 
 ### 7. Should Step 4's skip threshold be on file count?
+
+> **Resolved.** Re-keyed onto seam severity: any `blocker` always dispatches the seam analyst
+> however few files resolved, two or more `major` seams dispatch, and a domain with only
+> `moderate` seams is read directly. A one-file domain with a cycle is exactly the case that
+> needed the agent and exactly the case the old file-count gate skipped.
 
 The SKILL skips seam-analyst dispatch below ~5 files. Every DocuSeal domain was 1 file, so the agent
 layer — described in the skill's own preamble as the point of the report — never ran across 34
@@ -117,6 +139,10 @@ and that file count is the wrong axis; **seam count or severity** would be bette
 with a `blocker` cycle is exactly when you want a human-grade read of the call sites.
 
 ### 8. What does the boundary-resolver trigger actually key on?
+
+> **Resolved.** Both skills now trigger on the `evidence` map rather than the file count.
+> `namespace` or `constant` + `path` is exact and dispatches nothing; `path` alone is a possible
+> name coincidence and dispatches. A flat 34-model app now dispatches zero agents instead of 34.
 
 Both skills say *"fewer than 3 files resolved → dispatch `rails-boundary-resolver`"*, and
 `extract-compare` strengthens it to *every* such domain. All 34 DocuSeal domains resolved to one file

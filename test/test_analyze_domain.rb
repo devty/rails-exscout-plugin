@@ -421,3 +421,40 @@ class TestConstantResolver < Minitest::Test
     end
   end
 end
+
+# The score is an absolute estimate of work, not a percentile within the repo.
+# 23 of 34 DocuSeal domains scored Clean, which reads as poor resolution until
+# you can see that most of those models genuinely are leaves. The report has to
+# carry its own denominator for that to be checkable.
+class TestRepoScale < Minitest::Test
+  include FixtureRepo
+
+  def test_report_carries_the_repo_scale_it_was_measured_against
+    with_repo(FIXTURE) do |dir|
+      idx = ExtractScout::Indexer.new(repo_root: dir).build
+      r = ExtractScout::Analyzer.new(idx, 'Billing').analyze
+      assert_equal idx['stats']['files_indexed'], r['repo']['files_indexed']
+      assert_equal idx['stats']['constants'], r['repo']['constants']
+    end
+  end
+
+  def test_text_report_shows_the_domain_against_the_repo
+    with_repo(FIXTURE) do |dir|
+      idx = ExtractScout::Indexer.new(repo_root: dir).build
+      r = ExtractScout::Analyzer.new(idx, 'Billing').analyze
+      r['entanglement_score'] = ExtractScout::Verdict.score(r['metrics'])
+      assert_match(/of \d+ indexed/, ExtractScout::Render.text(r))
+    end
+  end
+
+  # A hand-built index with no stats block must not crash the renderer.
+  def test_missing_stats_degrade_quietly
+    with_repo(FIXTURE) do |dir|
+      idx = ExtractScout::Indexer.new(repo_root: dir).build
+      idx.delete('stats')
+      r = ExtractScout::Analyzer.new(idx, 'Billing').analyze
+      assert_kind_of Hash, r['repo']
+      ExtractScout::Render.text(r) # must not raise
+    end
+  end
+end

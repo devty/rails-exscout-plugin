@@ -28,52 +28,68 @@ mkdir -p "$CACHE"
 ruby "${CLAUDE_PLUGIN_ROOT}/scripts/build_index.rb" --root . --out "$CACHE/index.json"
 ```
 
-## Step 2 — Analyze each domain
+## Step 2 — Rank them in one pass
 
-For each name, run the analyzer in JSON mode and keep the `metrics`, `entanglement_score`,
-`max_severity` and `seams`:
+The analyzer ranks a whole candidate set itself. Do **not** run it once per domain and sort
+the results by hand: that is deterministic work, it costs a model pass per candidate, and
+every re-derivation is another chance to transcribe a number wrong.
 
 ```bash
+printf '%s\n' $ARGUMENTS > "$CACHE/candidates.txt"
 ruby "${CLAUDE_PLUGIN_ROOT}/scripts/analyze_domain.rb" \
-  --index "$CACHE/index.json" --domain "$NAME" --format json
+  --index "$CACHE/index.json" --domains-from "$CACHE/candidates.txt" --summary
 ```
 
-Domains resolving to fewer than 3 files need the `rails-boundary-resolver` agent before
-their numbers mean anything. When comparing, dispatch the agent for **every** weakly
-resolved domain, not just some — an unresolved domain looks artificially clean, and that
-asymmetry silently corrupts the ranking. Run these agents concurrently in one message.
+Add `--format json` when you need each domain's `metrics`, `max_severity`, `evidence` and
+`seams` to write the prose. Use `--all` in place of `--domains-from` for a portfolio pass over
+every namespace in the repo — or every top-level unit, in a repo that has no namespaces.
 
-If a domain cannot be resolved at all, exclude it from the ranking and say so explicitly.
-Never let it place well by default.
+Names that resolve to no files are reported on stderr and left out of the table. Name them
+explicitly in the report; never let an unresolved domain place well by default.
 
-## Step 3 — Rank
+### When a boundary needs the resolver agent
 
-Order by ascending extraction cost, weighing in this order:
+Dispatch `rails-boundary-resolver` on the **evidence**, not on the file count. Most Rails
+apps are flat, so nearly every domain resolves to one file — a file-count trigger dispatches
+one agent per model against boundaries that were already exact. The `evidence` map in the
+JSON records how each file was matched:
 
-1. **Blocking** (`max_severity == "blocker"`) — a domain with any genuine cycle ranks below
-   one with none, regardless of size. A cycle is preparatory work you cannot skip, and
-   `entanglement_score` deliberately does not encode it: rank on `max_severity` first, then
-   on score. A blocked 2.0 goes after a clean 6.0.
-2. **Facade leakage** (`exposed_constants`) — how many internals outsiders touch. This
-   predicts API design effort better than raw edge count.
-3. **Inbound units** — how many callers need a client on cutover day.
-4. **Boundary associations** — data-layer work, usually the long pole.
-5. **Size** (`domain_files`, `domain_loc`) — as a tiebreak only. Small and tangled is worse
-   than large and clean.
+| evidence for the domain's files | reading |
+|---|---|
+| `namespace`, or `constant` + `path` | exact. No agent needed. |
+| `path` only | could be a name coincidence. Dispatch. |
+| `agent:*` only, or nothing resolved | dispatch, or exclude the domain and say so. |
 
-Cross-domain check worth surfacing: if two candidates cycle *with each other*, neither can
-go first independently. Say so — that pair is one extraction, not two, and it is the single
-most useful thing this command can tell a team.
+Run whatever agents you do dispatch concurrently in one message.
+
+## Step 3 — Read the ranking
+
+The script orders by ascending extraction cost and puts blocking ahead of size: a blocked 2.0
+goes after a clean 6.0, because a blocker is a precondition rather than a quantity. Your job
+is not to re-sort that — it is to explain it, and to add the three things the table cannot
+say for itself:
+
+1. **Coupled pairs.** If two candidates cycle *with each other*, neither can go first
+   independently. That pair is one extraction, not two, and it is the single most useful
+   thing this command can tell a team. The table cannot see it — read the `cycles` entries
+   across domains and notice when two of them name each other.
+2. **Facade leakage vs raw volume.** `exposed_constants` predicts API design effort better
+   than edge count does. Two domains at the same score with very different exposure are not
+   the same job, and the score alone will not tell the reader that.
+3. **What the number does not travel with.** The score is calibrated for ordering *within one
+   repo* — see "Reading the score" in the `extract-scout` skill. Rank freely here; do not
+   quote the absolute number as a portable grade.
 
 ## Step 4 — Report
 
-Print a comparison table:
+Print the table the script produced. It is already ordered and already carries the
+`NOT ANALYZED` clause:
 
 ```
-DOMAIN       SCORE  FILES  IN   OUT  EXPOSED  CYCLES  VERDICT
-Notifications  2.1     14    9     4        3       0  Moderate
-Billing        4.1      4     8     9        2       1  Moderate, BLOCKED
-Inventory      7.8     31    44   19       17       3  Very hard, BLOCKED
+DOMAIN                  SCORE  FILES    IN   OUT  EXPOSED  CYCLES  VERDICT
+Notifications             2.1     14     9     4        3       0  Moderate
+Inventory                 7.8     31    44    19       17       3  Very hard
+Billing                   4.1      4     8     9        2       1  Moderate, BLOCKED
 ```
 
 Then, in prose:

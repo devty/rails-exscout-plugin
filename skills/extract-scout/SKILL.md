@@ -65,13 +65,23 @@ match. That is sufficient for a namespaced domain (`app/models/billing/**`).
 
 **It is not sufficient for the common case where a domain is conceptual rather than
 namespaced** — where `Invoice`, `LedgerEntry` and `Receipt` are all Billing but none is
-under a `Billing::` namespace. Dispatch the `rails-boundary-resolver` agent when any of
-these hold:
+under a `Billing::` namespace.
 
-- the script exits with "matched no files"
-- fewer than 3 files resolved
-- `evidence` shows only `path` matches (name coincidence, not structure)
-- the user named a business concept with no matching namespace
+**Trigger the `rails-boundary-resolver` agent on the `evidence` map, not on the file count.**
+Most Rails apps are flat, so a one-file result is the norm rather than a warning sign — a
+file-count trigger dispatches an agent against boundaries that were already exact. What
+`evidence` records is *how* each file was matched, which is the thing that actually
+distinguishes a resolved boundary from a lucky guess:
+
+| evidence | reading | action |
+|---|---|---|
+| `namespace` | the domain is a real namespace | no agent |
+| `constant` + `path` | name and structure agree | no agent |
+| `path` only | could be a name coincidence | **dispatch** |
+| script exits "matched no files" | nothing resolved | **dispatch** |
+
+Also dispatch when the user named a business concept with no matching namespace, regardless
+of what resolved — that is the case the agent exists for.
 
 Pass the agent the domain name and the index path. It returns constants and files to feed
 back as `--extra-const` / `--extra-file`, then re-run the analysis. Report what the agent
@@ -84,8 +94,15 @@ The script reports graph structure. It does not know what the code *means*. For 
 seams, dispatch the `rails-seam-analyst` agent with those citations to read the actual call
 sites and report what breaking each seam concretely requires.
 
-Skip this only when the domain resolves to fewer than ~5 files and the seam list is short
-enough to read directly. In that case read the cited files yourself with Read.
+**Decide this on the seams, not on the file count.** A one-file domain with a `blocker` seam
+is exactly when a human-grade read of the call sites is worth most — whether that cycle is a
+one-line injection or a redesign is invisible in the graph and decides the whole estimate.
+Gating on size skips the agent precisely where a small, dense domain needs it.
+
+- Any seam at `blocker` severity → **always dispatch**, however few files resolved.
+- Two or more seams at `major` → dispatch.
+- Only `moderate` seams, or none → read the cited files yourself with Read. There is little
+  for the agent to add when nothing is blocking.
 
 ## Step 5 — Write the report
 
@@ -149,6 +166,27 @@ Tell the user the file was written, that it is worth committing, and that the ho
 until they set `"enforce": true` on the boundaries they actually want defended. If this write
 adds more than a handful of domains at once, say so explicitly — that is a measurement sweep,
 not an architecture decision, and enforcing all of it would be a mistake.
+
+## Reading the score
+
+The score estimates **how much work**, on an absolute scale. Its saturation constants are
+absolute deliberately: ten inbound units means ten client adapters to write on cutover day,
+and that is the same amount of work in a 34-model app as in a 400-model one. The number does
+travel across repos as an effort estimate.
+
+What does **not** travel is reading it as a percentile. On a small app a 4.7 is an outlier; on
+a large one it is unremarkable. The report prints the domain's size against the indexed repo —
+`Resolved to 4 files of 304 indexed` — so the reader can tell which they are looking at. Quote
+that alongside the score whenever the number leaves the report.
+
+Two consequences worth stating in the report when they apply:
+
+- **A cluster at the bottom is signal, not poor resolution.** In a flat Rails app most models
+  genuinely are leaves, and a scale that puts two-thirds of them under 2.0 is describing the
+  app accurately. Say that, rather than letting it read as the tool failing to discriminate.
+- **The score never encodes blocking.** A 1.1 with a `blocker` is a harder job than a 6.0
+  without one. That is why the headline carries both, and why `/extract-compare` ranks on
+  `max_severity` before score.
 
 ## Rules
 
