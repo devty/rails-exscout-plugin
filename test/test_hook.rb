@@ -151,7 +151,20 @@ class TestHook < Minitest::Test
 
   # ------------------------------------------------------- with a boundary map
 
+  # A deliberate decision: these two boundaries are meant to be defended.
   DOMAINS = JSON.generate(
+    'domains' => {
+      'Billing' => { 'enforce' => true,
+                     'files' => ['app/models/ledger_entry.rb'], 'constants' => ['LedgerEntry'] },
+      'Fulfillment' => { 'enforce' => true,
+                         'files' => ['app/models/order.rb'], 'constants' => ['Order'] }
+    },
+    'ignore' => ['app/models/legacy/**']
+  )
+
+  # What a per-model sweep writes: every model recorded as its own "domain".
+  # That is a measurement, not a decision, so nothing in it is enforced.
+  SWEEP = JSON.generate(
     'domains' => {
       'Billing' => { 'files' => ['app/models/ledger_entry.rb'], 'constants' => ['LedgerEntry'] },
       'Fulfillment' => { 'files' => ['app/models/order.rb'], 'constants' => ['Order'] }
@@ -189,6 +202,78 @@ class TestHook < Minitest::Test
                            %(belongs_to :shipment, class_name: "Shipping::Shipment")))
       refute_nil msg
       assert_includes msg, 'inferred from namespaces'
+    end
+  end
+  # --------------------------------------------------- measured vs defended
+  #
+  # domains.json used to mean two different things at once: "what I measured"
+  # and "what I want defended". A 34-model sweep writes 34 single-model domains,
+  # which turned every ordinary belongs_to in the app into a boundary warning --
+  # the hook's design constraint #1 broken by following the skill correctly.
+  # Enforcement is now explicit, and unenforced entries fall back to the
+  # conservative namespace inference the hook used before any sweep ran.
+
+  def test_a_sweep_does_not_arm_the_hook
+    with_app('.extract-scout/domains.json' => SWEEP) do |dir|
+      # Ordinary Rails: LedgerEntry belongs_to :order. Both were "measured",
+      # neither was defended, so this is schema, not an architecture violation.
+      assert_nil fire(dir, edit('app/models/ledger_entry.rb', 'x', 'belongs_to :order'))
+    end
+  end
+
+  def test_enforced_boundaries_still_warn
+    with_app('.extract-scout/domains.json' => DOMAINS) do |dir|
+      msg = fire(dir, edit('app/models/ledger_entry.rb', 'x', 'belongs_to :order'))
+      refute_nil msg
+      assert_includes msg, 'Billing -> Fulfillment'
+    end
+  end
+
+  # Defending one side is not a decision about the pair.
+  def test_a_half_enforced_pair_stays_silent
+    half = JSON.generate(
+      'domains' => {
+        'Billing' => { 'enforce' => true,
+                       'files' => ['app/models/ledger_entry.rb'], 'constants' => ['LedgerEntry'] },
+        'Fulfillment' => { 'files' => ['app/models/order.rb'], 'constants' => ['Order'] }
+      }
+    )
+    with_app('.extract-scout/domains.json' => half) do |dir|
+      assert_nil fire(dir, edit('app/models/ledger_entry.rb', 'x', 'belongs_to :order'))
+    end
+  end
+
+  # An unenforced map must not disable the namespace fallback -- that is the
+  # near-zero-false-positive case and it worked before any sweep ran.
+  def test_unenforced_map_leaves_namespace_inference_intact
+    with_app('.extract-scout/domains.json' => SWEEP) do |dir|
+      msg = fire(dir, edit('app/models/billing/invoice.rb', 'x',
+                           %(belongs_to :shipment, class_name: "Shipping::Shipment")))
+      refute_nil msg
+      assert_includes msg, 'Billing -> Shipping'
+      assert_includes msg, 'inferred from namespaces'
+    end
+  end
+
+  # ignore is a statement about paths, not about enforcement.
+  def test_ignore_globs_survive_an_unenforced_map
+    with_app('.extract-scout/domains.json' => SWEEP) do |dir|
+      assert_nil fire(dir, edit('app/models/legacy/thing.rb', 'x',
+                                %(belongs_to :shipment, class_name: "Shipping::Shipment")))
+    end
+  end
+
+  def test_explicit_enforce_false_is_honoured
+    off = JSON.generate(
+      'domains' => {
+        'Billing' => { 'enforce' => false,
+                       'files' => ['app/models/ledger_entry.rb'], 'constants' => ['LedgerEntry'] },
+        'Fulfillment' => { 'enforce' => false,
+                           'files' => ['app/models/order.rb'], 'constants' => ['Order'] }
+      }
+    )
+    with_app('.extract-scout/domains.json' => off) do |dir|
+      assert_nil fire(dir, edit('app/models/ledger_entry.rb', 'x', 'belongs_to :order'))
     end
   end
 end

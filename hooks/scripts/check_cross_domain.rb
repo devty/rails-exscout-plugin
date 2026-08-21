@@ -62,6 +62,17 @@ module ExtractScout
 
     # Boundary map persisted by /extract-scout. Optional -- absence just means
     # the hook falls back to namespace inference.
+    #
+    # Only domains explicitly marked `enforce: true` arm the hook. The file
+    # records two different things that were previously conflated: boundaries
+    # that were MEASURED, and boundaries someone decided to DEFEND. Only the
+    # second is a reason to interrupt an edit.
+    #
+    # A per-model sweep writes one entry per model, so treating every entry as a
+    # defended boundary turned every ordinary `belongs_to` in a Rails app into a
+    # warning -- constraint #1 broken by following the skill correctly. Entries
+    # without the flag fall back to namespace inference, which is what the hook
+    # did before any sweep ran.
     def load_domains(project_dir)
       path = File.join(project_dir, '.extract-scout', 'domains.json')
       return nil unless File.file?(path)
@@ -69,9 +80,16 @@ module ExtractScout
       data = JSON.parse(File.read(path))
       return nil unless data.is_a?(Hash) && data['domains'].is_a?(Hash)
 
-      data
+      enforced = data['domains'].select { |_, meta| meta.is_a?(Hash) && meta['enforce'] == true }
+      data.merge('domains' => enforced)
     rescue StandardError
       nil
+    end
+
+    # A map with nothing enforced is not an authoritative boundary source -- it
+    # is a measurement, and warnings still rest on namespace inference.
+    def enforcing?(domains)
+      !domains.nil? && !domains['domains'].empty?
     end
 
     def ignored?(domains, rel_path)
@@ -245,7 +263,7 @@ module ExtractScout
       exit 0 if findings.empty?
 
       puts JSON.generate(
-        'systemMessage' => format_warning(findings, source_domain, !domains.nil?)
+        'systemMessage' => format_warning(findings, source_domain, enforcing?(domains))
       )
       exit 0
     rescue StandardError
