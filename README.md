@@ -123,7 +123,10 @@ dependency graph of a Rails app *is* its constant-reference graph.
 1. **`scripts/build_index.rb`** lexes every `.rb` file with `Ripper` (Ruby stdlib — no gems,
    no bundler, nothing installed into your repo) and records which constants each file
    defines and references, with line numbers and edge kinds: `superclass`, `mixin`,
-   `association`, `delegation`, `dsl_string`, `reference`.
+   `association`, `polymorphic`, `delegation`, `reference`, `polymorphic_ref`, `dsl_string`.
+   It also pairs polymorphic interfaces across files — `belongs_to :record, polymorphic: true`
+   in one file and `has_one :search_entry, as: :record` in another — so a polymorphic
+   association resolves to the models that actually implement it.
 
 2. **`scripts/analyze_domain.rb`** resolves the domain to a file set, walks every crossing
    edge using Ruby's real lexical-scope lookup rules, and classifies the crossings into
@@ -144,12 +147,23 @@ Naive constant-graph tools get these wrong, and each error inflates the reported
   Rails registers `app/*/concerns` as its own autoload root.
 - A bare `Calculator` inside `module Billing` resolves to `Billing::Calculator`, not to some
   unrelated top-level `Calculator`.
-- `has_many :line_items, class_name: "Billing::LineItem"` is **one** edge, not two.
+- `has_many :line_items, class_name: "Billing::LineItem"` is **one** edge, not two — including
+  when the macro wraps across lines, which is where the override usually lives.
+- `has_many :x, through: :y` depends on *two* models: the join, which the file names, and the
+  far end, which `source:` decides on the join model. Both are reported.
+- `belongs_to :record, polymorphic: true` has no single target class. The name is an interface,
+  not a constant; inferring `Record` from it points the edge at something that does not exist.
 - `Invoice belongs_to :order` + `Order has_many :invoices` is **not a cycle**. It is one
   relationship declared from both ends — the standard Rails idiom. A true cycle needs
   behavioral edges in both directions.
 - Constants hidden in strings (`"BillingJob".constantize`, `to: "billing/invoices#show"`)
   are real edges, reported separately because no refactoring tool will catch them for you.
+  A capitalised string needs a *syntactic* reason to count, though: `default: 'UTC'` is a
+  timezone, not a constant. Strings compared against a `*_type` column are the polymorphic
+  discriminator and are reported with the polymorphic seam, not as generic string coupling.
+- A namespace with edges in both directions is not automatically a cycle. If `Ledger::Report`
+  calls in and `Ledger::Secret` gets called back, no *file* is on both sides — that is a
+  `namespace_pair`, real work but not a precondition.
 
 ## What it does not analyze
 
@@ -262,6 +276,9 @@ blocker stays legible at every magnitude.
 Three places encode judgment, all deliberately isolated in `scripts/analyze_domain.rb`:
 
 - **`SEAM_WEIGHTS`** — the ordering of what has to break first.
+- **`ASSOC_MAJOR_PER_FILE`** — crossing associations per domain file at which the volume stops
+  being ordinary Rails (default 5). Below it the association seam is `moderate`, at or above it
+  `major`; it is never a blocker, because volume is work rather than a precondition.
 - **`Verdict.score`** — magnitude only: *how much* work, 0–10. Each component saturates so
   no single large number dominates — 400 inbound edges is a lot of mechanical work, not an
   impossibility.

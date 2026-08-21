@@ -18,6 +18,54 @@ class TestIndexer < Minitest::Test
 
   def index(dir, **opts) = ExtractScout::Indexer.new(repo_root: dir, **opts).build
 
+  # Two models declare the `record` interface; only SearchEntry is actually
+  # targeted by an `as: :record` declaration, so WebhookEvent's target set is
+  # empty. That asymmetry is the point: the pairing key is the association's
+  # own target constant, not the bare interface name.
+  POLY = {
+    'app/models/search_entry.rb' =>
+      "class SearchEntry < ApplicationRecord\n  belongs_to :record, polymorphic: true\nend\n",
+    'app/models/submitter.rb' =>
+      "class Submitter < ApplicationRecord\n  has_one :search_entry, as: :record\nend\n",
+    'app/models/template.rb' =>
+      "class Template < ApplicationRecord\n  has_one :search_entry, as: :record\nend\n",
+    'app/models/webhook_event.rb' =>
+      "class WebhookEvent < ApplicationRecord\n  belongs_to :record, polymorphic: true\nend\n"
+  }.freeze
+
+  def poly_refs(idx, rel)
+    idx['files'][rel]['refs'].select { |r| r['kind'] == 'polymorphic' }
+  end
+
+  def test_polymorphic_edges_resolve_to_the_models_implementing_the_interface
+    with_repo(POLY) do |dir|
+      consts = poly_refs(index(dir), 'app/models/search_entry.rb').map { |r| r['const'] }
+      assert_equal %w[Submitter Template], consts.sort
+    end
+  end
+
+  def test_polymorphic_edges_are_cited_at_the_declaration_line
+    with_repo(POLY) do |dir|
+      lines = poly_refs(index(dir), 'app/models/search_entry.rb').map { |r| r['line'] }.uniq
+      assert_equal [2], lines
+    end
+  end
+
+  def test_polymorphic_interface_with_no_implementors_yields_no_edges
+    with_repo(POLY) do |dir|
+      assert_empty poly_refs(index(dir), 'app/models/webhook_event.rb')
+    end
+  end
+
+  # Recorded even when unresolvable, so a domain can report an unbounded
+  # polymorphic association rather than looking clean.
+  def test_polymorphic_declarations_are_recorded_on_the_file
+    with_repo(POLY) do |dir|
+      assert_equal [{ 'name' => 'record', 'line' => 2 }],
+                   index(dir)['files']['app/models/webhook_event.rb']['polymorphic']
+    end
+  end
+
   def test_indexes_application_code
     with_repo(APP) do |dir|
       files = index(dir)['files'].keys
