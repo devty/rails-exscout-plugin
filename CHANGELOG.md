@@ -38,6 +38,10 @@ plugin is `0.x`, minor bumps may change behaviour.
   replaced by a tally and citations capped. ~64k tokens to ~10k on a large domain, for
   decisions that never needed the difference. The terminal report also caps its seam list,
   and says how many it hid and at what severity rather than truncating silently.
+- **Ambience is relative to the domain.** A globally-ambient constant is reinstated as real
+  coupling when 60%+ of its structural edges come from inside the domain being scouted.
+  Mastodons `JsonLdHelper` -- 379 lines of ActivityPub protocol, 76% of its includes inside
+  ActivityPub -- was being set aside from the one report that most needed it.
 - **Seams order by severity tier, then size.** The README always promised "ordered by what
   blocks what, not by size"; scores had no saturation, so on ActivityPub one `moderate` seam
   outranked twenty-six blockers.

@@ -1009,6 +1009,7 @@ module ExtractScout
           }
         },
         'ubiquitous'     => (@ubiquitous.to_a + ambient.keys).uniq.sort,
+        'structural_kinds' => STRUCTURAL_KINDS,
         'ambient'        => ambient,
         'namespaces'     => namespaces,
         'packs'          => @packs,

@@ -62,21 +62,40 @@ extraction has to resolve.
 
 Argue with it here first:
 
-- **A shared concern that carries real domain behaviour.** `Billing::Taxable` included by 12 units
-  is set aside by this rule, and if it contains the tax logic then extracting Billing genuinely
-  does have to deal with it. The rule assumes widely-included concerns are thin. That is usually
-  true and not always.
-- **The 10-unit floor is a guess.** It is an absolute, not a ratio, because the structural test now
-  carries the discrimination — but on a 650-unit app 10 units is 1.5%, and a concern shared by
-  exactly 10 unrelated units may well be the coupling you wanted to see. On a 15-unit app it is
-  two thirds of the repo, which is clearly ambient. The floor is doing different work at different
-  scales, and no single number is right for both.
-- **A base class with behaviour.** `BaseService` at 100% structural is set aside, but if every
-  service inherits real logic from it, a domain moving out takes that logic or reimplements it.
-  That is a genuine extraction cost this rule hides. It is disclosed in `AMBIENT` rather than
-  dropped silently, which is the mitigation, not a fix.
-- **Repos with few units.** Below 12 top-level units nothing is measured at all and only the
-  curated list applies, because a ratio over six units is not evidence of anything.
+- ~~**A shared concern that carries real domain behaviour.**~~ **Fixed — see "Ambience is
+  relative to the domain" below.** This was the first case listed here, and looking for a repo
+  that exhibited it found one immediately, in a corpus repo already checked in.
+
+### Ambience is relative to the domain
+
+Ambience is measured across the whole app, but a report is about **one domain**, and the two can
+disagree.
+
+Mastodon's `JsonLdHelper` clears the global rule easily — 12 units, 100% structural — so the
+first version of this set it aside from every report. But **35 of its 46 includes (76%) are
+inside ActivityPub**, and it is 379 lines of `canonicalize`, `compact`, `patch_for_forwarding!`,
+`safe_for_forwarding?`, `fetch_resource` and `collection_items`. ActivityPub *is* JSON-LD. That
+is the protocol implementation, factored into a helper — not scaffolding, and anyone extracting
+ActivityPub takes all 379 lines with them.
+
+A domain contributes many **edges** but only one **unit**, so the global measure and the local
+one pull apart exactly here. The refinement: a globally-ambient constant is **reinstated** as
+real coupling for a domain when at least 60% of its structural edges originate inside that
+domain's own file set.
+
+| module | structural edges | inside ActivityPub | |
+|---|---|---|---|
+| `JsonLdHelper` | 46 | **35 (76%)** | **reinstated** |
+| `RoutingHelper` | 61 | 18 (30%) | stays ambient |
+| `Payloadable` | 33 | 7 (21%) | stays ambient |
+| `Redisable` | 64 | 6 (9%) | stays ambient |
+
+The separation is clean again — 76% against a 9–30% cluster — which is some evidence the
+threshold is not balanced on a knife edge.
+
+Ambience is therefore a property of the **pair**, not of the constant. `JsonLdHelper` is
+reinstated for ActivityPub and still set aside for `Web`, which merely uses it. Both readings
+are correct, and the report says which one it applied and why.
 
 ### Changing it
 
