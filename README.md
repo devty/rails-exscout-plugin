@@ -83,12 +83,25 @@ extract-scout: new cross-domain association
   the seam gives you the same data without welding the domains together.
 ```
 
-**It gets smarter after you run the audit.** With no boundary map, the hook can only trust
-namespaces — it catches `Billing::Invoice -> Shipping::Shipment` and stays quiet otherwise.
-Once `/extract-scout` writes `.extract-scout/domains.json`, the hook inherits the boundary
-the resolver worked out, including unnamespaced domains no naming convention reveals. The
-example above is exactly that case: `LedgerEntry` and `Order` are both top-level constants,
-and nothing in their names says they belong to different domains.
+**It arms only on boundaries you choose to defend.** With no boundary map the hook trusts
+namespaces alone — it catches `Billing::Invoice -> Shipping::Shipment` and stays quiet
+otherwise. `/extract-scout` records what it resolved into `.extract-scout/domains.json`,
+including unnamespaced domains no naming convention reveals. The example above is exactly that
+case: `LedgerEntry` and `Order` are both top-level constants, and nothing in their names says
+they belong to different domains.
+
+**Recording a boundary is not deciding to defend it,** and `enforce` marks the difference.
+Everything the scout writes is `"enforce": false` — a measurement. The hook stays on namespace
+inference until you flip an entry yourself:
+
+```json
+"Billing": { "enforce": true, "files": ["..."], "constants": ["..."] }
+```
+
+That split exists because the alternative was measured and it was bad. A per-model sweep of a
+34-model app recorded 34 "domains", and treating all of them as defended made every ordinary
+`belongs_to` in the app a warning — the hook's first design constraint broken by following the
+skill correctly. Measurement is cheap and broad; enforcement is a decision and should be narrow.
 
 Commit `.extract-scout/domains.json`. The boundary is a shared architectural decision, and
 committing it means the hook protects the whole team rather than one laptop.
@@ -100,7 +113,8 @@ ambiguous case resolves to silence:
 
 | Situation | Behavior |
 |---|---|
-| Association between two identified domains | **warns** |
+| Association between two `enforce: true` domains | **warns** |
+| Association between domains that were only measured (`enforce: false`) | silent |
 | Association within one domain (incl. Ruby lexical scope) | silent |
 | Target not in any identified domain — unclassified, not foreign | silent |
 | Source file belongs to no identified domain | silent |
@@ -111,9 +125,41 @@ ambiguous case resolves to silence:
 Turn it off entirely with `EXTRACT_SCOUT_HOOK=off`, or exclude paths via an `ignore` glob
 list in `.extract-scout/domains.json`.
 
-Cost is roughly 6ms over Ruby interpreter startup for an edit with no association — the
-common case — because the parser only loads once a macro is actually detected in the added
-text. It reads only the text the edit introduced, never the repo.
+### Knowing it still works
+
+Silence is the contract, which means a *broken* hook and a *quiet* one look identical: the
+blanket rescue that stops an analysis bug from breaking your tools also exits 0 on a crash.
+The parser is shared with `/extract-scout`, so a parser regression would degrade this hook to
+a permanent no-op with no signal at all.
+
+Two ways to check, neither of which requires noticing an absence:
+
+```bash
+ruby hooks/scripts/check_cross_domain.rb --self-test
+```
+
+Builds a throwaway two-domain repo, feeds itself a crossing association, and reports whether
+the warning came out. It constructs its own payload rather than documenting a shell one-liner
+— a shell mangling `\n` inside the JSON is what once produced a confident, wrong "the hook
+does not fire" conclusion.
+
+```bash
+EXTRACT_SCOUT_HOOK=debug
+```
+
+Names the exit path on stderr for every invocation — `no association macro in the added text`,
+`app/models/x.rb belongs to no identified domain`, or the exception and backtrace the rescue
+swallowed. Off by default and silent on the hot path.
+
+Cost, measured on macOS arm64 / Ruby 3.3 over 50 invocations each: **~53 ms** for an edit with
+no association — the common case — against a **~46 ms** floor for `ruby -e ''`. The hook's own
+work is the ~7 ms difference; everything else is interpreter startup, and no algorithmic change
+touches it. Quote the absolute, not just the delta: if a ~50 ms `PostToolUse` hook is too much,
+the lever is the process model, not the script.
+
+An edit that does contain an association costs ~61 ms, because the parser only loads once a
+macro is actually detected in the added text. It reads only the text the edit introduced, never
+the repo.
 
 ## How it works
 

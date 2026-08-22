@@ -93,9 +93,15 @@ A comparison resolves several domains in one pass, which is the cheapest moment 
 them all. Merge each into `.extract-scout/domains.json` using the schema in the
 `extract-scout` skill, preserving domains already recorded there.
 
-This is what the `PostToolUse` cross-domain hook reads. After a comparison, the hook can
-warn about associations between any pair of domains examined here — including unnamespaced
-ones no naming convention would reveal.
+Write every one of them with `"enforce": false`. A comparison is a measurement — the whole
+point is that the team has not yet decided which domain to extract, so none of these
+boundaries is a decision anyone has made. The `PostToolUse` hook arms only on enforced
+domains, and enforcing a whole comparison set would warn on ordinary associations across
+most of the app.
+
+Once the team picks a domain and commits to the boundary, they flip that one entry to
+`"enforce": true` and the hook starts defending it. Say so when you report the file was
+written.
 
 Skip any domain that failed to resolve. A wrong boundary in this file produces wrong
 warnings on every future edit, which is worse than no boundary at all.

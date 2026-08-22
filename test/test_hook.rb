@@ -151,7 +151,20 @@ class TestHook < Minitest::Test
 
   # ------------------------------------------------------- with a boundary map
 
+  # A deliberate decision: these two boundaries are meant to be defended.
   DOMAINS = JSON.generate(
+    'domains' => {
+      'Billing' => { 'enforce' => true,
+                     'files' => ['app/models/ledger_entry.rb'], 'constants' => ['LedgerEntry'] },
+      'Fulfillment' => { 'enforce' => true,
+                         'files' => ['app/models/order.rb'], 'constants' => ['Order'] }
+    },
+    'ignore' => ['app/models/legacy/**']
+  )
+
+  # What a per-model sweep writes: every model recorded as its own "domain".
+  # That is a measurement, not a decision, so nothing in it is enforced.
+  SWEEP = JSON.generate(
     'domains' => {
       'Billing' => { 'files' => ['app/models/ledger_entry.rb'], 'constants' => ['LedgerEntry'] },
       'Fulfillment' => { 'files' => ['app/models/order.rb'], 'constants' => ['Order'] }
@@ -190,5 +203,150 @@ class TestHook < Minitest::Test
       refute_nil msg
       assert_includes msg, 'inferred from namespaces'
     end
+  end
+  # --------------------------------------------------- measured vs defended
+  #
+  # domains.json used to mean two different things at once: "what I measured"
+  # and "what I want defended". A 34-model sweep writes 34 single-model domains,
+  # which turned every ordinary belongs_to in the app into a boundary warning --
+  # the hook's design constraint #1 broken by following the skill correctly.
+  # Enforcement is now explicit, and unenforced entries fall back to the
+  # conservative namespace inference the hook used before any sweep ran.
+
+  def test_a_sweep_does_not_arm_the_hook
+    with_app('.extract-scout/domains.json' => SWEEP) do |dir|
+      # Ordinary Rails: LedgerEntry belongs_to :order. Both were "measured",
+      # neither was defended, so this is schema, not an architecture violation.
+      assert_nil fire(dir, edit('app/models/ledger_entry.rb', 'x', 'belongs_to :order'))
+    end
+  end
+
+  def test_enforced_boundaries_still_warn
+    with_app('.extract-scout/domains.json' => DOMAINS) do |dir|
+      msg = fire(dir, edit('app/models/ledger_entry.rb', 'x', 'belongs_to :order'))
+      refute_nil msg
+      assert_includes msg, 'Billing -> Fulfillment'
+    end
+  end
+
+  # Defending one side is not a decision about the pair.
+  def test_a_half_enforced_pair_stays_silent
+    half = JSON.generate(
+      'domains' => {
+        'Billing' => { 'enforce' => true,
+                       'files' => ['app/models/ledger_entry.rb'], 'constants' => ['LedgerEntry'] },
+        'Fulfillment' => { 'files' => ['app/models/order.rb'], 'constants' => ['Order'] }
+      }
+    )
+    with_app('.extract-scout/domains.json' => half) do |dir|
+      assert_nil fire(dir, edit('app/models/ledger_entry.rb', 'x', 'belongs_to :order'))
+    end
+  end
+
+  # An unenforced map must not disable the namespace fallback -- that is the
+  # near-zero-false-positive case and it worked before any sweep ran.
+  def test_unenforced_map_leaves_namespace_inference_intact
+    with_app('.extract-scout/domains.json' => SWEEP) do |dir|
+      msg = fire(dir, edit('app/models/billing/invoice.rb', 'x',
+                           %(belongs_to :shipment, class_name: "Shipping::Shipment")))
+      refute_nil msg
+      assert_includes msg, 'Billing -> Shipping'
+      assert_includes msg, 'inferred from namespaces'
+    end
+  end
+
+  # ignore is a statement about paths, not about enforcement.
+  def test_ignore_globs_survive_an_unenforced_map
+    with_app('.extract-scout/domains.json' => SWEEP) do |dir|
+      assert_nil fire(dir, edit('app/models/legacy/thing.rb', 'x',
+                                %(belongs_to :shipment, class_name: "Shipping::Shipment")))
+    end
+  end
+
+  def test_explicit_enforce_false_is_honoured
+    off = JSON.generate(
+      'domains' => {
+        'Billing' => { 'enforce' => false,
+                       'files' => ['app/models/ledger_entry.rb'], 'constants' => ['LedgerEntry'] },
+        'Fulfillment' => { 'enforce' => false,
+                           'files' => ['app/models/order.rb'], 'constants' => ['Order'] }
+      }
+    )
+    with_app('.extract-scout/domains.json' => off) do |dir|
+      assert_nil fire(dir, edit('app/models/ledger_entry.rb', 'x', 'belongs_to :order'))
+    end
+  end
+end
+
+# A hook whose blanket rescue swallows an exception exits 0 -- identically to a
+# clean pass with nothing to say. That is the right call for constraint #1, but
+# it means a silently broken hook is a permanent no-op nobody ever notices.
+#
+# This is not theoretical: during the DocuSeal sweep a malformed payload made
+# JSON.parse raise, the rescue swallowed it, and the conclusion drawn was "the
+# hook does not fire on ordinary associations" -- the opposite of the truth.
+class TestHookDebug < Minitest::Test
+  include FixtureRepo
+
+  HOOK = File.join(ROOT, 'hooks', 'scripts', 'check_cross_domain.rb')
+
+  def fire_capturing_stderr(dir, payload, env = {})
+    out, err, = Open3.capture3({ 'CLAUDE_PROJECT_DIR' => dir }.merge(env),
+                               RbConfig.ruby, HOOK, stdin_data: payload)
+    [out, err]
+  end
+
+  def edit(path, old_string, new_string)
+    JSON.generate('tool_name' => 'Edit',
+                  'tool_input' => { 'file_path' => path,
+                                    'old_string' => old_string, 'new_string' => new_string })
+  end
+
+  def test_silence_is_silent_by_default
+    with_repo(TestHook::APP) do |dir|
+      _, err = fire_capturing_stderr(dir, edit('app/models/billing/invoice.rb', 'x', 'def t; end'))
+      assert_empty err.strip, 'the hook must say nothing on the hot path'
+    end
+  end
+
+  def test_debug_mode_names_the_exit_path
+    with_repo(TestHook::APP) do |dir|
+      _, err = fire_capturing_stderr(dir, edit('app/models/billing/invoice.rb', 'x', 'def t; end'),
+                                     'EXTRACT_SCOUT_HOOK' => 'debug')
+      refute_empty err.strip
+      assert_match(/no association macro/i, err)
+    end
+  end
+
+  # The exact failure from the sweep: corrupt JSON, swallowed, exit 0.
+  def test_debug_mode_surfaces_a_swallowed_exception
+    with_repo(TestHook::APP) do |dir|
+      _, err = fire_capturing_stderr(dir, '{ not json', 'EXTRACT_SCOUT_HOOK' => 'debug')
+      assert_match(/JSON|ParserError/i, err)
+    end
+  end
+
+  def test_debug_mode_still_exits_zero
+    with_repo(TestHook::APP) do |dir|
+      out, = fire_capturing_stderr(dir, '{ not json', 'EXTRACT_SCOUT_HOOK' => 'debug')
+      assert_empty out.strip
+    end
+  end
+
+  def test_off_still_wins_over_debug
+    with_repo(TestHook::APP) do |dir|
+      _, err = fire_capturing_stderr(dir, edit('app/models/billing/invoice.rb', 'x',
+                                               %(belongs_to :shipment, class_name: "Shipping::Shipment")),
+                                     'EXTRACT_SCOUT_HOOK' => 'off')
+      assert_empty err.strip
+    end
+  end
+
+  # Proves the hook can still fire, without the shell quoting that already
+  # produced one false "it does not work" conclusion.
+  def test_self_test_confirms_the_hook_can_fire
+    out, err, status = Open3.capture3(RbConfig.ruby, HOOK, '--self-test')
+    assert_predicate status, :success?, "self-test failed:\n#{out}\n#{err}"
+    assert_match(/ok/i, out)
   end
 end

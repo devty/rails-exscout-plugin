@@ -133,6 +133,12 @@ literally and burns 34 agent invocations.
 
 ### 9. What is the hook's real-world signal-to-noise, and who validates the file it trusts?
 
+> **Resolved.** `domains.json` now carries a per-domain `enforce` flag and the hook arms only on
+> entries set to `true`. Both skills write `"enforce": false`, so a sweep records without arming,
+> and unenforced entries fall back to namespace inference — the pre-sweep behaviour. Suggested fix
+> 2 was taken over 1 because it needs no migration: an existing 34-domain file goes quiet
+> immediately, since a missing flag reads as `false`. Six tests in `test/test_hook.rb`.
+
 This one bit during the sweep, and it is the most interesting finding in this document because
 **following the skill correctly produced the failure.**
 
@@ -178,20 +184,33 @@ macOS arm64, Ruby 3.3.0, 10 invocations each:
 
 | path | per-invocation |
 |---|---|
-| association present (parser loads, full analysis) | ~108 ms |
-| no association (cheap pre-filter exits early) | ~115 ms |
-| bare `ruby -e ''` — interpreter startup floor | ~95 ms |
+| association present (parser loads, full analysis) | ~61 ms |
+| no association (cheap pre-filter exits early) | ~53 ms |
+| bare `ruby -e ''` — interpreter startup floor | ~46 ms |
 
-The pre-filter at `check_cross_domain.rb:196` is well-intentioned and **buys nothing measurable**:
-~95ms of the ~110ms is `ruby` process startup, and `require_relative` of the 512-line
-`build_index.rb` costs ~13ms on top. Constraint #2's "tens of milliseconds" budget is missed by ~4×,
-and no amount of work-avoidance inside the script will fix it — the cost is paid before the first
-line executes.
+> **Corrected 2026-08-21.** The original run reported 108 / 115 / 95 ms and concluded the pre-filter
+> "buys nothing measurable". That ordering is impossible — it put the *cheaper* path 7 ms slower than
+> the expensive one — and a re-run at 50 invocations per path (above) shows the table was noise. The
+> pre-filter is worth ~8 ms on the common path, which is most of the hook's own working time. Do not
+> remove it.
+
+The conclusion that survives is about the denominator, not the pre-filter: ~46 ms of a ~53 ms
+invocation is `ruby` process startup, so the script's own work is ~7 ms and no amount of further
+work-avoidance inside it will move the total. Constraint #2's "tens of milliseconds" is met on a
+literal reading and missed on the spirit of it.
 
 If the budget matters, the lever is process model, not algorithm: a long-lived helper, or accepting
-~110ms as the floor for any Ruby-based `PostToolUse` hook and documenting it.
+~50 ms as the floor for any Ruby-based `PostToolUse` hook and documenting it — which the README now
+does, quoting the absolute rather than only the delta.
 
 ### The blanket rescue is indistinguishable from success — demonstrated accidentally
+
+> **Resolved.** `EXTRACT_SCOUT_HOOK=debug` names every exit path on stderr and prints the
+> exception and backtrace the rescue swallowed; the hot path stays byte-for-byte silent by
+> default. `--self-test` builds a throwaway two-domain repo and confirms a warning still comes
+> out, constructing its own payload so the shell cannot mangle it the way it did the first
+> time. 6 tests in `test/test_hook.rb`, including a regression test for the exact corrupt-JSON
+> case that caused the original misdiagnosis.
 
 `rescue StandardError; exit 0` is the right call for constraint #1: a hook must never break the
 user's tools. But there is no observable difference between *"analyzed, nothing to say"* and

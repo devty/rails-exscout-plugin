@@ -106,10 +106,18 @@ and give the report path.
 
 ## Step 6 — Persist the boundary map
 
-Record the resolved boundary to `.extract-scout/domains.json`. This is what upgrades the
-`PostToolUse` hook from namespace-guessing to knowing: without it the hook can only catch
-associations between two namespaced domains, and with it the hook also catches unnamespaced
-domains the boundary resolver identified.
+Record the resolved boundary to `.extract-scout/domains.json`.
+
+**Measuring a boundary is not the same as deciding to defend it.** This file holds both, and
+`enforce` is what separates them. Write `"enforce": false` for anything resolved as part of an
+audit. Only a deliberate architectural decision — someone saying *"this boundary is real and I
+want it protected"* — flips it to `true`.
+
+That distinction is load-bearing. The `PostToolUse` hook arms only on enforced domains. A sweep
+that records every model as its own domain and marks them all enforced turns every ordinary
+`belongs_to` into a warning, and a hook that cries wolf gets switched off within a day and then
+protects nothing. Unenforced entries leave the hook on its conservative namespace-inference
+fallback, which is the near-zero-false-positive case.
 
 **Merge, never overwrite.** Scouting `Payments` must not erase the `Billing` entry recorded
 last week.
@@ -119,6 +127,7 @@ last week.
   "version": 1,
   "domains": {
     "Billing": {
+      "enforce": false,
       "confidence": "medium",
       "scouted": "2026-08-20",
       "files": ["app/models/billing/invoice.rb", "app/models/ledger_entry.rb"],
@@ -130,12 +139,16 @@ last week.
 ```
 
 Read any existing file first, replace only this domain's key, and write the merged result.
+**Never downgrade an existing `"enforce": true` to `false`** — that is a decision the user made,
+and re-scouting a domain must not silently disarm the boundary they chose to protect.
+
 Carry `confidence` through from the boundary resolver — a `low`-confidence boundary produces
 low-confidence hook warnings, and the reader deserves to know which they are.
 
-Tell the user the file was written and that it is worth committing: the boundary is a shared
-architectural decision, and committing it means the hook protects the whole team rather than
-one laptop.
+Tell the user the file was written, that it is worth committing, and that the hook stays quiet
+until they set `"enforce": true` on the boundaries they actually want defended. If this write
+adds more than a handful of domains at once, say so explicitly — that is a measurement sweep,
+not an architecture decision, and enforcing all of it would be a mistake.
 
 ## Rules
 

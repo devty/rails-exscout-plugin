@@ -62,6 +62,17 @@ module ExtractScout
 
     # Boundary map persisted by /extract-scout. Optional -- absence just means
     # the hook falls back to namespace inference.
+    #
+    # Only domains explicitly marked `enforce: true` arm the hook. The file
+    # records two different things that were previously conflated: boundaries
+    # that were MEASURED, and boundaries someone decided to DEFEND. Only the
+    # second is a reason to interrupt an edit.
+    #
+    # A per-model sweep writes one entry per model, so treating every entry as a
+    # defended boundary turned every ordinary `belongs_to` in a Rails app into a
+    # warning -- constraint #1 broken by following the skill correctly. Entries
+    # without the flag fall back to namespace inference, which is what the hook
+    # did before any sweep ran.
     def load_domains(project_dir)
       path = File.join(project_dir, '.extract-scout', 'domains.json')
       return nil unless File.file?(path)
@@ -69,9 +80,16 @@ module ExtractScout
       data = JSON.parse(File.read(path))
       return nil unless data.is_a?(Hash) && data['domains'].is_a?(Hash)
 
-      data
+      enforced = data['domains'].select { |_, meta| meta.is_a?(Hash) && meta['enforce'] == true }
+      data.merge('domains' => enforced)
     rescue StandardError
       nil
+    end
+
+    # A map with nothing enforced is not an authoritative boundary source -- it
+    # is a measurement, and warnings still rest on namespace inference.
+    def enforcing?(domains)
+      !domains.nil? && !domains['domains'].empty?
     end
 
     def ignored?(domains, rel_path)
@@ -164,57 +182,82 @@ module ExtractScout
       lines.join("\n")
     end
 
+    # ------------------------------------------------------------------ debug
+    #
+    # `rescue StandardError; exit 0` is right for constraint #1 -- a hook must
+    # never break the user's tools -- but it makes a crash on line one look
+    # exactly like a clean pass with nothing to say. A silently broken hook then
+    # degrades to a permanent no-op that nobody notices.
+    #
+    # This is not hypothetical. A malformed payload once made JSON.parse raise,
+    # the rescue swallowed it, the hook exited 0, and the conclusion drawn was
+    # "the hook does not fire on ordinary associations" -- the opposite of the
+    # truth. Debug mode makes every exit path say which one it took.
+
+    def debug?
+      ENV['EXTRACT_SCOUT_HOOK'].to_s.downcase == 'debug'
+    end
+
+    def bail(reason)
+      warn "extract-scout hook: #{reason}" if debug?
+      exit 0
+    end
+
     # ------------------------------------------------------------------- main
 
     def run
       exit 0 if ENV['EXTRACT_SCOUT_HOOK'].to_s.downcase == 'off'
 
       raw = $stdin.read
-      exit 0 if raw.nil? || raw.strip.empty?
+      bail('empty payload on stdin') if raw.nil? || raw.strip.empty?
 
       payload = JSON.parse(raw)
       tool_name = payload['tool_name'].to_s
-      exit 0 unless EDIT_TOOLS.include?(tool_name)
+      bail("tool #{tool_name.inspect} does not edit files") unless EDIT_TOOLS.include?(tool_name)
 
       tool_input = payload['tool_input']
-      exit 0 unless tool_input.is_a?(Hash)
+      bail('tool_input is not an object') unless tool_input.is_a?(Hash)
 
       file_path = tool_input['file_path'].to_s
-      exit 0 unless file_path.end_with?('.rb')
+      bail("#{file_path.inspect} is not a .rb file") unless file_path.end_with?('.rb')
 
       project_dir = ENV['CLAUDE_PROJECT_DIR'] || payload['cwd'] || Dir.pwd
       project_dir = File.expand_path(project_dir)
       abs = File.expand_path(file_path, project_dir)
-      exit 0 unless abs.start_with?("#{project_dir}/")
+      bail("#{abs} is outside #{project_dir}") unless abs.start_with?("#{project_dir}/")
 
       rel_path = abs.delete_prefix("#{project_dir}/")
-      exit 0 unless APP_ROOTS.include?(rel_path.split('/').first)
+      unless APP_ROOTS.include?(rel_path.split('/').first)
+        bail("#{rel_path} is outside #{APP_ROOTS.join(' ')}")
+      end
 
       added = added_text(tool_name, tool_input)
-      exit 0 if added.strip.empty?
+      bail('the edit added no new lines') if added.strip.empty?
       # Cheap pre-filter: skip the parser entirely when no macro is present.
-      exit 0 unless added.match?(/\b(belongs_to|has_many|has_one|has_and_belongs_to_many)\b/)
+      unless added.match?(/\b(belongs_to|has_many|has_one|has_and_belongs_to_many)\b/)
+        bail('no association macro in the added text')
+      end
 
       # Only now is the parser worth loading. A crashing PostToolUse hook is far
       # worse than a missed warning, so a failed load exits quietly.
       begin
         require_relative '../../scripts/build_index'
-      rescue StandardError, LoadError
-        exit 0
+      rescue StandardError, LoadError => e
+        bail("could not load the parser: #{e.class}: #{e.message}")
       end
 
       domains = load_domains(project_dir)
-      exit 0 if ignored?(domains, rel_path)
+      bail("#{rel_path} matches an ignore glob") if ignored?(domains, rel_path)
 
       source_const = AutoloadRoots.new(project_dir).constant_for(abs)
       source_domain = domain_of_file(domains, rel_path, source_const)
       # No identifiable source domain means no boundary to cross. Stay quiet.
-      exit 0 if source_domain.nil?
+      bail("#{rel_path} belongs to no identified domain") if source_domain.nil?
 
       source_ns = namespace_of(source_const)
       analyzer = FileAnalyzer.new(rel_path, added).analyze
       associations = analyzer.refs.select { |r| r.kind == 'association' }
-      exit 0 if associations.empty?
+      bail('the added text parsed to no associations') if associations.empty?
 
       added_lines = added.lines
       findings = []
@@ -242,17 +285,69 @@ module ExtractScout
         }
       end
 
-      exit 0 if findings.empty?
+      bail("#{associations.size} association(s) found, none crossing an enforced boundary") if findings.empty?
 
       puts JSON.generate(
-        'systemMessage' => format_warning(findings, source_domain, !domains.nil?)
+        'systemMessage' => format_warning(findings, source_domain, enforcing?(domains))
       )
       exit 0
-    rescue StandardError
-      # Never let an analysis bug surface as a tool error.
+    rescue StandardError => e
+      # Never let an analysis bug surface as a tool error -- but in debug mode,
+      # say what was swallowed. A crash and a clean pass are both exit 0.
+      if debug?
+        warn "extract-scout hook: #{e.class}: #{e.message}"
+        warn(e.backtrace.first(5).map { |l| "  #{l}" }.join("\n")) if e.backtrace
+      end
       exit 0
+    end
+
+    # ------------------------------------------------------------- self-test
+    #
+    # Proves the hook can still fire. The shared FileAnalyzer means a parser
+    # regression degrades this hook to a permanent no-op, and the blanket rescue
+    # guarantees that failure is invisible -- so "is it still working?" needs an
+    # answer that does not depend on noticing an absence.
+    #
+    # Builds its own payload rather than documenting a shell one-liner: the
+    # original false "the hook does not work" conclusion came from a shell
+    # mangling `\n` inside the JSON.
+    def self_test
+      require 'tmpdir'
+      require 'fileutils'
+      require 'open3'
+
+      Dir.mktmpdir('extract-scout-selftest') do |dir|
+        FileUtils.mkdir_p(File.join(dir, 'app', 'models', 'alpha'))
+        FileUtils.mkdir_p(File.join(dir, 'app', 'models', 'beta'))
+        File.write(File.join(dir, 'app/models/alpha/thing.rb'), "module Alpha\n  class Thing\n  end\nend\n")
+        File.write(File.join(dir, 'app/models/beta/other.rb'), "module Beta\n  class Other\n  end\nend\n")
+
+        payload = JSON.generate(
+          'tool_name' => 'Edit',
+          'tool_input' => {
+            'file_path' => 'app/models/alpha/thing.rb',
+            'old_string' => 'class Thing',
+            'new_string' => %(class Thing\n    belongs_to :other, class_name: "Beta::Other")
+          }
+        )
+        out, err, = Open3.capture3({ 'CLAUDE_PROJECT_DIR' => dir },
+                                   RbConfig.ruby, __FILE__, stdin_data: payload)
+
+        if out.include?('Alpha -> Beta')
+          puts 'extract-scout hook self-test: ok -- fires on a cross-domain association'
+          exit 0
+        end
+
+        warn 'extract-scout hook self-test: FAILED -- no warning was produced'
+        warn "  stdout: #{out.inspect}"
+        warn "  stderr: #{err.inspect}"
+        warn '  Re-run the failing case with EXTRACT_SCOUT_HOOK=debug to see the exit path.'
+        exit 1
+      end
     end
   end
 end
 
-ExtractScout::Hook.run if __FILE__ == $PROGRAM_NAME
+if __FILE__ == $PROGRAM_NAME
+  ARGV.include?('--self-test') ? ExtractScout::Hook.self_test : ExtractScout::Hook.run
+end
