@@ -95,9 +95,9 @@ module ExtractScout
   # then absolute. Without this, a bare `LedgerEntry` inside `module Billing`
   # either misses entirely or falsely binds to a same-named class elsewhere.
   class ConstantResolver
-    def initialize(index)
+    def initialize(index, reinstate: [])
       @constants = index['constants']
-      @ubiquitous = Set.new(index['ubiquitous'])
+      @ubiquitous = Set.new(index['ubiquitous']) - Set.new(reinstate)
     end
 
     def resolve(const, from_namespace)
@@ -232,7 +232,8 @@ module ExtractScout
       )
       @domain_files = resolved[:files]
       @evidence = resolved[:evidence]
-      @resolver = ConstantResolver.new(index)
+      @reinstated = reinstated_ambient
+      @resolver = ConstantResolver.new(index, reinstate: @reinstated.keys)
     end
 
     attr_reader :domain_files
@@ -251,7 +252,8 @@ module ExtractScout
         meta['refs'].each do |ref|
           # Record ambient reach before resolution drops it, so the report can
           # show what was set aside rather than silently omitting it.
-          if from_is_domain && (info = ambient_index[ref['const']])
+          if from_is_domain && !@reinstated.key?(ref['const']) &&
+             (info = ambient_index[ref['const']])
             ambient_hits[ref['const']] ||= info.merge('edges' => 0)
             ambient_hits[ref['const']]['edges'] += 1
           end
@@ -287,6 +289,49 @@ module ExtractScout
     end
 
     private
+
+    # Ambience is measured across the whole app, but a report is about ONE
+    # domain. A module whose structural edges come mostly from inside the domain
+    # is that domain's own code, however widely it is used elsewhere, and anyone
+    # extracting the domain takes it with them.
+    #
+    # Mastodon's JsonLdHelper is the case this exists for: 46 includes, 35 of
+    # them inside ActivityPub, 379 lines of canonicalize / compact /
+    # patch_for_forwarding! / fetch_resource. That is the protocol, not utility.
+    # RoutingHelper at 30% inside, Payloadable at 21% and Redisable at 9% are
+    # genuinely spread, and stay set aside.
+    REINSTATE_PCT = 60
+
+    def reinstated_ambient
+      ambient = @index['ambient'] || {}
+      return {} if ambient.empty?
+
+      # Read the kinds from the index rather than restating them here, so the
+      # two scripts cannot drift about what "structural" means.
+      structural = @index['structural_kinds'] || %w[mixin superclass]
+      inside = Hash.new(0)
+      total = Hash.new(0)
+
+      @index['files'].each do |rel, meta|
+        within = @domain_files.include?(rel)
+        meta['refs'].each do |ref|
+          next unless structural.include?(ref['kind']) && ambient.key?(ref['const'])
+
+          total[ref['const']] += 1
+          inside[ref['const']] += 1 if within
+        end
+      end
+
+      ambient.each_with_object({}) do |(const, info), out|
+        next if total[const].zero?
+
+        pct = (inside[const] * 100.0 / total[const]).round
+        next if pct < REINSTATE_PCT
+
+        out[const] = info.merge('inside' => inside[const], 'of_edges' => total[const],
+                                'inside_pct' => pct)
+      end
+    end
 
     def namespace_of(const)
       return '' unless const&.include?('::')
@@ -334,6 +379,7 @@ module ExtractScout
         # Set aside is not ignored. A reader has to see what was removed from
         # the graph before the numbers were taken, and be able to disagree.
         'ambient'       => ambient_hits,
+        'ambient_reinstated' => @reinstated,
         'target_label'  => @spec['label'],
         'target_caveat' => @spec['caveat'],
         'files'   => @domain_files.to_a.sort,
@@ -1161,6 +1207,17 @@ module ExtractScout
                                 .map { |sev, n| "#{n} #{sev}" }.join(', ')
         out << "  ... #{hidden} more of #{report['seams'].size} seams not shown (#{by_sev})."
         out << '      Use --format json for all of them; they are ranked, not truncated at random.'
+        out << ''
+      end
+
+      reinstated = report['ambient_reinstated'] || {}
+      unless reinstated.empty?
+        out << 'AMBIENT BUT REINSTATED (widely used across the app, yet mostly used from'
+        out << "inside this domain -- so it is this domain's own code, and it counts):"
+        reinstated.sort_by { |_, v| -v['inside_pct'] }.first(10).each do |const, v|
+          out << format('  - %-30s %d%% of its %d structural edges come from inside',
+                        const, v['inside_pct'], v['of_edges'])
+        end
         out << ''
       end
 

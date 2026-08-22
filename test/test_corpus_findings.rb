@@ -377,3 +377,141 @@ class TestRootScopedDefinitions < Minitest::Test
     end
   end
 end
+
+# -- F10/F11: found by running against Discourse ----------------------------
+class TestDiscourseFindings < Minitest::Test
+  include FixtureRepo
+
+  def setup = ExtractScout::Inflect.reset!
+  def teardown = ExtractScout::Inflect.reset!
+
+  # Discourse ships 44 plugins under plugins/<name>/, each marked by a plugin.rb
+  # and holding its own app/. That is the same shape as a gem marked by a
+  # gemspec, but plugins have no gemspec -- so plugins/chat/app/models was not an
+  # autoload root and Chat::Channel resolved to nothing. 107 of 153 unresolved
+  # associations were in plugin directories.
+  PLUGIN_APP = {
+    'plugins/chat/plugin.rb' => "# name: chat\n",
+    'plugins/chat/app/models/chat/channel.rb' => "module Chat\n  class Channel\n    has_many :messages, class_name: \"Chat::Message\"\n  end\nend\n",
+    'plugins/chat/app/models/chat/message.rb' => "module Chat\n  class Message\n  end\nend\n",
+    'app/models/topic.rb' => "class Topic\nend\n"
+  }.freeze
+
+  def roots(dir) = ExtractScout::AutoloadRoots.new(dir).roots.map { |r| r.sub("#{dir}/", '') }
+
+  def test_a_plugin_rb_marks_its_app_subdirectories_as_roots
+    with_repo(PLUGIN_APP) { |dir| assert_includes roots(dir), 'plugins/chat/app/models' }
+  end
+
+  def test_plugin_constants_resolve
+    with_repo(PLUGIN_APP) do |dir|
+      idx = ExtractScout::Indexer.new(repo_root: dir).build
+      assert_equal 'Chat::Channel', idx['files']['plugins/chat/app/models/chat/channel.rb']['primary_const']
+      assert_equal 1.0, ExtractScout.diagnose(idx)['by_kind']['association']['rate']
+    end
+  end
+
+  def test_a_directory_without_plugin_rb_is_not_a_root
+    files = PLUGIN_APP.reject { |k, _| k.end_with?('plugin.rb') }
+    with_repo(files) { |dir| refute(roots(dir).any? { |r| r.start_with?('plugins/') }) }
+  end
+
+  # Discourse's inflector is path-dependent Ruby we cannot model: the directory
+  # `onceoff` maps to Jobs, but the file `onceoff.rb` maps to Onceoff. Applying
+  # the override to every segment gave Jobs::Jobs for a file that plainly says
+  # `class Jobs::Onceoff`.
+  #
+  # A compact-style declaration is unambiguous ground truth, so when the file
+  # declares a fully-qualified constant that disagrees with the path, the
+  # declaration wins.
+  def test_a_qualified_declaration_beats_a_conflicting_path
+    files = {
+      'config/initializers/zeitwerk.rb' =>
+        "Rails.autoloaders.each { |a| a.inflector.inflect(\"onceoff\" => \"Jobs\") }\n",
+      'app/jobs/onceoff/onceoff.rb' => "class Jobs::Onceoff\nend\n"
+    }
+    with_repo(files) do |dir|
+      idx = ExtractScout::Indexer.new(repo_root: dir).build
+      assert_equal 'Jobs::Onceoff', idx['files']['app/jobs/onceoff/onceoff.rb']['primary_const']
+      assert_empty ExtractScout.diagnose(idx)['name_mismatches']
+    end
+  end
+
+  # The nested form declares bare names, which are NOT ground truth -- Billing
+  # and Invoice separately say nothing about Billing::Invoice. The path wins.
+  def test_a_bare_nested_declaration_does_not_override_the_path
+    with_repo('app/models/billing/invoice.rb' => "module Billing\n  class Invoice\n  end\nend\n") do |dir|
+      idx = ExtractScout::Indexer.new(repo_root: dir).build
+      assert_equal 'Billing::Invoice', idx['files']['app/models/billing/invoice.rb']['primary_const']
+    end
+  end
+
+  def test_an_agreeing_qualified_declaration_changes_nothing
+    with_repo('app/models/billing/invoice.rb' => "class Billing::Invoice\nend\n") do |dir|
+      idx = ExtractScout::Indexer.new(repo_root: dir).build
+      assert_equal 'Billing::Invoice', idx['files']['app/models/billing/invoice.rb']['primary_const']
+    end
+  end
+end
+
+# -- F12: Zeitwerk ignore directives -----------------------------------------
+#
+# Discourse's lib/freedom_patches/ holds monkey-patches that reopen gem classes:
+# active_record_attribute_methods.rb reopens ActiveRecord::AttributeMethods, it
+# does not define FreedomPatches::ActiveRecordAttributeMethods. Discourse tells
+# Zeitwerk so, explicitly:
+#
+#   Rails.autoloaders.main.ignore("lib/tasks", "lib/freedom_patches", ...)
+#
+# Not reading that left 21 files with invented constants, every one reported as
+# a missing inflection rule it was not -- and a corpus repo that warns forever
+# trains people to ignore warnings.
+class TestAutoloadIgnores < Minitest::Test
+  include FixtureRepo
+
+  def setup = ExtractScout::Inflect.reset!
+  def teardown = ExtractScout::Inflect.reset!
+
+  APP = {
+    'config/application.rb' => "module App\n  class Application < Rails::Application\n    config.autoload_lib(ignore: %w[tasks generators])\n  end\nend\n",
+    'config/initializers/000-zeitwerk.rb' =>
+      "Rails.autoloaders.main.ignore(\n  \"lib/freedom_patches\",\n  \"lib/release_utils\",\n)\n",
+    'lib/freedom_patches/active_record_attribute_methods.rb' =>
+      "module ActiveRecord\n  module AttributeMethods\n  end\nend\n",
+    'lib/tasks/thing.rb' => "class Thing\nend\n",
+    'lib/guardian/base.rb' => "class Base\nend\n"
+  }.freeze
+
+  def index
+    with_repo(APP) { |dir| return ExtractScout::Indexer.new(repo_root: dir).build }
+  end
+
+  def test_an_ignored_directory_yields_no_path_constant
+    f = index['files']['lib/freedom_patches/active_record_attribute_methods.rb']
+    refute f['autoloadable']
+    refute_equal 'FreedomPatches::ActiveRecordAttributeMethods', f['primary_const']
+  end
+
+  def test_the_file_falls_back_to_what_it_declares
+    f = index['files']['lib/freedom_patches/active_record_attribute_methods.rb']
+    assert_includes f['declared'], 'ActiveRecord'
+  end
+
+  def test_autoload_lib_ignore_entries_are_honoured
+    refute index['files']['lib/tasks/thing.rb']['autoloadable']
+  end
+
+  def test_lib_paths_that_are_not_ignored_still_resolve
+    assert index['files']['lib/guardian/base.rb']['autoloadable']
+  end
+
+  def test_ignored_monkey_patches_stop_looking_like_missing_inflection_rules
+    assert_empty ExtractScout.diagnose(index)['name_mismatches']
+  end
+
+  def test_a_repo_with_no_ignore_directives_is_unaffected
+    files = { 'config/application.rb' => "module App\n  class Application < Rails::Application\n    config.autoload_lib\n  end\nend\n",
+              'lib/thing.rb' => "class Thing\nend\n" }
+    with_repo(files) { |dir| assert ExtractScout::Indexer.new(repo_root: dir).build['files']['lib/thing.rb']['autoloadable'] }
+  end
+end

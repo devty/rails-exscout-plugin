@@ -73,9 +73,21 @@ manifest['repos'].each do |entry|
     failures << "#{name}: #{metric} #{actual} < #{minimum}" if actual < minimum
   end
 
-  unless d['warnings'].empty?
-    d['warnings'].each { |w| failures << "#{name}: #{w}" }
+  # A budget rather than zero tolerance. Real apps contain genuinely
+  # path-divergent files -- Discourse has five, each idiosyncratic and correctly
+  # flagged -- and demanding zero would mean either chasing them forever or
+  # switching the tripwire off. A budget lets a regression from 5 to 50 fail
+  # while a known 5 passes.
+  budget = expect['name_mismatch_max'] || 0
+  mismatches = d['name_mismatches'].size
+  puts format('  name mismatches   %d   (budget %d)', mismatches, budget)
+  if mismatches > budget
+    failures << "#{name}: #{mismatches} name mismatches, budget #{budget}"
   end
+
+  # Warnings other than the mismatch one still fail outright.
+  d['warnings'].reject { |w| w.include?('path does not imply') }
+               .each { |w| failures << "#{name}: #{w}" }
 
   checked += 1
   puts
