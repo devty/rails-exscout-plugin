@@ -96,3 +96,33 @@ class TestDiagnose < Minitest::Test
     assert_includes text, 'NonexistentThing'
   end
 end
+
+# by_kind was a Hash.new {} whose default block materialises a bucket on read.
+# Looking up 'association' in a repo that has none therefore invented a row with
+# no 'rate', and the renderer divided by nil. Every fixture above happens to
+# contain an association, which is exactly why this reached the CLI instead.
+class TestDiagnoseWithoutAssociations < Minitest::Test
+  include FixtureRepo
+
+  NO_ASSOCS = {
+    'app/models/api_key.rb' => "class APIKey\nend\n",
+    'app/models/account.rb' => "class Account\n  def rotate\n    APIKey.find(1)\n  end\nend\n"
+  }.freeze
+
+  def diagnose
+    with_repo(NO_ASSOCS) { |dir| return ExtractScout.diagnose(ExtractScout::Indexer.new(repo_root: dir).build) }
+  end
+
+  def test_no_phantom_association_row_is_invented
+    refute_includes diagnose['by_kind'].keys, 'association'
+  end
+
+  def test_every_reported_kind_carries_a_rate
+    diagnose['by_kind'].each { |kind, b| refute_nil b['rate'], "#{kind} has no rate" }
+  end
+
+  def test_renders_without_raising
+    text = ExtractScout::Render.diagnostics(diagnose)
+    assert_includes text, 'RESOLUTION'
+  end
+end

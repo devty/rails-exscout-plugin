@@ -75,6 +75,7 @@ distinguishes a resolved boundary from a lucky guess:
 
 | evidence | reading | action |
 |---|---|---|
+| `pack` | a declared Packwerk boundary — the team wrote it down | no agent |
 | `namespace` | the domain is a real namespace | no agent |
 | `constant` + `path` | name and structure agree | no agent |
 | `path` only | could be a name coincidence | **dispatch** |

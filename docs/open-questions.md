@@ -80,6 +80,25 @@ models genuinely are leaves.
 
 ### 4. What happens on a repo the conventions do not fit?
 
+> **Mostly resolved.**
+>
+> *Inflections* — `config/initializers/inflections.rb` and `zeitwerk.rb` are now parsed for
+> `acronym`, `irregular`, `uncountable` and `inflector.inflect` overrides, via Ripper so a
+> commented-out rule is not a rule. Backed by a second tripwire that needs no references at
+> all: under Zeitwerk a booting app cannot declare a constant its path does not imply, so
+> every such mismatch is proof of a rule the index does not know. `--diagnose` names the
+> file, both constants, and the initializer to check.
+>
+> *Packwerk* — answered in the direction the question suggested: read `package.yml` rather
+> than compete with it. Packs become the candidate domains, and `pack` is now the strongest
+> value in the `evidence` map, above `namespace`.
+>
+> *Still open* — Packwerk's `dependencies:` list is read but not yet used. It is declared
+> ground truth about which crossings are sanctioned, which would let a seam distinguish
+> "this edge violates a stated boundary" from "this edge is allowed and still has to move".
+> Non-Rails Ruby also still degrades quietly rather than announcing that path resolution is
+> weak, though `--diagnose` now makes the degradation measurable.
+
 `DEFAULT_EXCLUDES`, `DEFAULT_UBIQUITOUS` and the autoload-root globs encode Rails conventions.
 DocuSeal is textbook Rails, so this was never tested in anger. Open:
 

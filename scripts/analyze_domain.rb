@@ -38,6 +38,17 @@ module ExtractScout
       files = Set.new
       evidence = Hash.new { |h, k| h[k] = [] }
 
+      # A declared Packwerk boundary is the strongest evidence available: the
+      # team wrote it down, rather than the tool inferring it from a name.
+      if (pack_root = (@index['packs'] || {})[domain])
+        @index['files'].each_key do |rel|
+          next unless rel.start_with?("#{pack_root}/")
+
+          files << rel
+          evidence[rel] << 'pack'
+        end
+      end
+
       if (ns_files = @index['namespaces'][domain])
         ns_files.each { |f| files << f; evidence[f] << 'namespace' }
       end
@@ -651,6 +662,11 @@ module ExtractScout
   # none, and coming back empty would be useless there -- so fall back to
   # top-level constants, which are that app's de-facto units.
   def candidate_domains(index)
+    # A Packwerk app has already answered this question, explicitly and with
+    # more information than a convention guess. Prefer its answer.
+    packs = index['packs'] || {}
+    return packs.keys.sort unless packs.empty?
+
     namespaces = index['namespaces'].keys.reject { |n| n.include?('::') }
     return namespaces.sort unless namespaces.empty?
 
@@ -743,7 +759,43 @@ module ExtractScout
       b['rate'] = expected.zero? ? 1.0 : (b['resolved'].to_f / expected).round(3)
     end
 
+    # Drop the default block. Every read below this point is a lookup, and a
+    # lookup on a Hash.new{} MATERIALISES a bucket -- one with no 'rate', because
+    # rates were computed above. A repo with references but no associations then
+    # grew an empty 'association' row that crashed the renderer.
+    by_kind = Hash[by_kind]
+
+    # Under Zeitwerk a booting app guarantees the path-derived constant is one
+    # the file actually declares. A mismatch is not a style question -- it is
+    # proof of an inflection rule this tool does not know, and every edge
+    # touching that constant is being dropped. Detectable with no references in
+    # the repo at all, which makes it the cheapest tripwire available.
+    name_mismatches = []
+    index['files'].each do |rel, meta|
+      next unless meta['autoloadable']
+
+      declared = Array(meta['declared'])
+      primary = meta['primary_const']
+      next if declared.empty? || primary.nil?
+      next if declared.include?(primary)
+
+      tail = primary.split('::').last
+      next if declared.any? { |d| d.split('::').last == tail }
+
+      name_mismatches << {
+        'file' => rel, 'path_implies' => primary, 'file_declares' => declared
+      }
+    end
+
     warnings = []
+    unless name_mismatches.empty?
+      warnings << "#{name_mismatches.size} file(s) declare a constant the path does not imply " \
+                  "(e.g. #{name_mismatches.first['file']} declares " \
+                  "#{name_mismatches.first['file_declares'].first} but the path implies " \
+                  "#{name_mismatches.first['path_implies']}). That is an inflection rule this " \
+                  'index does not know -- check config/initializers/inflections.rb.'
+    end
+
     assoc = by_kind['association']
     if assoc && (assoc['total'] - assoc['ubiquitous']).positive? && assoc['rate'] < floor
       warnings << "association resolution #{(assoc['rate'] * 100).round}% is below the " \
@@ -755,6 +807,7 @@ module ExtractScout
     {
       'files_indexed' => (index['stats'] || {})['files_indexed'],
       'by_kind' => by_kind,
+      'name_mismatches' => name_mismatches,
       'warnings' => warnings
     }
   end
@@ -807,7 +860,7 @@ module ExtractScout
       d['by_kind'].sort_by { |k, _| k }.each do |kind, b|
         out << format('  %-14s %6d %6d %9d %11d %5d%%',
                       kind, b['total'], b['ubiquitous'], b['resolved'], b['unresolved'],
-                      (b['rate'] * 100).round)
+                      ((b['rate'] || 1.0) * 100).round)
       end
       out << ''
       if d['warnings'].empty?
@@ -816,6 +869,18 @@ module ExtractScout
         out << '  WARNINGS'
         d['warnings'].each { |w| out << "    - #{w}" }
       end
+      mismatches = d['name_mismatches'] || []
+      unless mismatches.empty?
+        out << ''
+        out << '  NAME MISMATCHES (the path implies one constant, the file declares another)'
+        mismatches.first(10).each do |m|
+          out << format('    %-44s path: %-22s file: %s',
+                        m['file'], m['path_implies'], m['file_declares'].join(', '))
+        end
+        out << '    Under Zeitwerk a booting app cannot disagree here, so each of these is an'
+        out << '    inflection rule this index does not know -- see config/initializers/inflections.rb.'
+      end
+
       examples = d['by_kind'].flat_map { |kind, b| b['examples'].map { |e| [kind, e] } }
       unless examples.empty?
         out << ''

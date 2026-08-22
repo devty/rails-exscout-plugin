@@ -56,6 +56,7 @@ JSON records how each file was matched:
 
 | evidence for the domain's files | reading |
 |---|---|
+| `pack` | a declared Packwerk boundary. No agent needed. |
 | `namespace`, or `constant` + `path` | exact. No agent needed. |
 | `path` only | could be a name coincidence. Dispatch. |
 | `agent:*` only, or nothing resolved | dispatch, or exclude the domain and say so. |

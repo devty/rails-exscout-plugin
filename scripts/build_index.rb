@@ -60,11 +60,44 @@ module ExtractScout
   module Inflect
     module_function
 
+    # Repo-specific rules, loaded once per index build by InflectionRules.load.
+    #
+    # This is module-level state, which is a smell in a library and deliberate in
+    # a CLI: every caller in the process is analyzing the same repo, and
+    # threading an inflector through AutoloadRoots, FileAnalyzer and the hook
+    # would add a parameter to every call site to express something that is
+    # genuinely global to a run. `reset!` keeps it testable.
+    def config
+      @config ||= { acronyms: {}, irregular: {}, uncountable: Set.new, overrides: {} }
+    end
+
+    def reset!
+      @config = nil
+    end
+
+    def configure(acronyms: [], irregular: {}, uncountable: [], overrides: {})
+      config[:acronyms]   = acronyms.to_h { |a| [a.downcase, a] }
+      config[:irregular]  = irregular
+      config[:uncountable] = Set.new(uncountable)
+      config[:overrides]  = overrides
+      config
+    end
+
     def camelize(str)
-      str.split('_').map { |part| part.empty? ? part : part[0].upcase + part[1..].to_s }.join
+      # An explicit Zeitwerk override is the last word -- it exists precisely
+      # because the derived name was wrong.
+      return config[:overrides][str] if config[:overrides].key?(str)
+
+      str.split('_').map do |part|
+        next part if part.empty?
+
+        config[:acronyms][part] || (part[0].upcase + part[1..].to_s)
+      end.join
     end
 
     def singularize(word)
+      return word if config[:uncountable].include?(word)
+      return config[:irregular][word] if config[:irregular].key?(word)
       return IRREGULAR_SINGULAR[word] if IRREGULAR_SINGULAR.key?(word)
 
       case word
@@ -80,6 +113,93 @@ module ExtractScout
     def association_constant(symbol_name, plural:)
       base = plural ? singularize(symbol_name) : symbol_name
       camelize(base)
+    end
+  end
+
+  # -------------------------------------------------------- inflection rules
+  #
+  # Rails apps configure their own inflections, and when they do, every constant
+  # carrying the rule mis-resolves without them: `inflect.acronym 'API'` makes
+  # app/models/api_key.rb define APIKey, and a tool deriving ApiKey drops every
+  # edge touching it. That is the D1 failure mode -- a constant resolving to
+  # nothing, dropped silently, understating coupling with no visible symptom.
+  #
+  # Read with Ripper rather than regex, so a commented-out rule is not a rule.
+  module InflectionRules
+    SOURCES = [
+      'config/initializers/inflections.rb',
+      'config/initializers/zeitwerk.rb',
+      'config/initializers/inflectors.rb'
+    ].freeze
+
+    module_function
+
+    def load(repo_root)
+      found = { acronyms: [], irregular: {}, uncountable: [], overrides: {} }
+      SOURCES.each do |rel|
+        abs = File.join(repo_root, rel)
+        next unless File.file?(abs)
+
+        merge!(found, extract(File.read(abs)))
+      end
+      found
+    rescue StandardError
+      { acronyms: [], irregular: {}, uncountable: [], overrides: {} }
+    end
+
+    def merge!(into, from)
+      into[:acronyms]    |= from[:acronyms]
+      into[:uncountable] |= from[:uncountable]
+      into[:irregular].merge!(from[:irregular])
+      into[:overrides].merge!(from[:overrides])
+      into
+    end
+
+    # Collects the string literals following each rule call, on that call's own
+    # logical line -- the same shape scan_for_class_name uses for class_name:.
+    def extract(source)
+      out = { acronyms: [], irregular: {}, uncountable: [], overrides: {} }
+      tokens = begin
+        Ripper.lex(source)
+      rescue StandardError
+        nil
+      end
+      return out if tokens.nil?
+
+      tokens.each_with_index do |tok, i|
+        (line, _col), type, value = tok
+        next unless type == :on_ident
+
+        strings = strings_on_line(tokens, i, line)
+        case value
+        when 'acronym'     then out[:acronyms] |= strings.first(1)
+        when 'uncountable' then out[:uncountable] |= strings
+        when 'irregular'
+          out[:irregular][strings[1]] = strings[0] if strings.size >= 2
+        when 'inflect'
+          # inflect("html_parser" => "HTMLParser", ...) -- pairs, not a single arg
+          strings.each_slice(2) { |k, v| out[:overrides][k] = v if k && v }
+        end
+      end
+      out
+    end
+
+    # Ripper never yields a comment's contents as :on_tstring_content, so a
+    # commented-out rule contributes nothing and needs no special case.
+    def strings_on_line(tokens, start, line)
+      found = []
+      j = start + 1
+      while j < tokens.length
+        (tok_line, _c), type, value = tokens[j]
+        # `inflect(...)` spans lines; keep reading while the args do.
+        break if tok_line > line && type == :on_ident
+
+        found << value if type == :on_tstring_content
+        break if type == :on_nl && found.any?
+
+        j += 1
+      end
+      found
     end
   end
 
@@ -551,6 +671,10 @@ module ExtractScout
       @excludes = DEFAULT_EXCLUDES + extra_excludes
       @excludes += TEST_DIRS unless include_tests
       @ubiquitous = Set.new(ubiquitous || DEFAULT_UBIQUITOUS)
+      # Must happen before AutoloadRoots, which camelizes path segments.
+      @inflections = InflectionRules.load(@repo_root)
+      @packs = discover_packs
+      Inflect.configure(**@inflections)
       @autoload = AutoloadRoots.new(@repo_root)
     end
 
@@ -620,10 +744,17 @@ module ExtractScout
           'files_indexed'  => files.size,
           'files_skipped'  => skipped,
           'constants'      => const_to_files.size,
-          'autoload_roots' => @autoload.roots.map { |r| r.delete_prefix("#{@repo_root}/") }
+          'autoload_roots' => @autoload.roots.map { |r| r.delete_prefix("#{@repo_root}/") },
+          'inflection_rules' => {
+            'acronyms' => @inflections[:acronyms],
+            'irregular' => @inflections[:irregular].size,
+            'uncountable' => @inflections[:uncountable].size,
+            'overrides' => @inflections[:overrides].size
+          }
         },
         'ubiquitous'     => @ubiquitous.to_a.sort,
         'namespaces'     => namespaces,
+        'packs'          => @packs,
         'constants'      => const_to_files,
         'files'          => files
       }
@@ -662,6 +793,25 @@ module ExtractScout
 
         parts = const.split('::')
         (1...parts.length).each { |n| out[parts[0...n].join('::')] << rel }
+      end
+      out
+    end
+
+    # Packwerk packages, keyed by the constant-shaped name a domain would be
+    # named by. An app running Packwerk has already declared its boundaries with
+    # more information than any naming convention can recover -- reading that
+    # declaration beats competing with it.
+    def discover_packs
+      out = {}
+      %w[packs/**/package.yml components/*/package.yml engines/*/package.yml].each do |glob|
+        Dir.glob(File.join(@repo_root, glob)).sort.each do |yml|
+          dir = File.dirname(yml)
+          rel = dir.delete_prefix("#{@repo_root}/")
+          next if rel == dir || rel.empty?
+          next if rel.split('/').any? { |seg| @excludes.include?(seg) }
+
+          out[Inflect.camelize(File.basename(dir))] = rel
+        end
       end
       out
     end

@@ -223,6 +223,14 @@ Naive constant-graph tools get these wrong, and each error inflates the reported
 - `Invoice belongs_to :order` + `Order has_many :invoices` is **not a cycle**. It is one
   relationship declared from both ends — the standard Rails idiom. A true cycle needs
   behavioral edges in both directions.
+- **Custom inflections are read, not guessed.** `inflect.acronym 'API'` makes
+  `app/models/api_key.rb` define `APIKey`; a tool deriving `ApiKey` drops every edge touching
+  it, silently. `config/initializers/inflections.rb` and `zeitwerk.rb` are parsed for
+  `acronym`, `irregular`, `uncountable` and `inflector.inflect` overrides — with Ripper, so a
+  commented-out rule is not a rule.
+- **Packwerk packages are read, not competed with.** When `packs/*/package.yml` exists, those
+  boundaries are the domains, and pack membership is recorded as the strongest evidence a
+  resolution can carry. The team already wrote down the answer this tool otherwise infers.
 - Constants hidden in strings (`"BillingJob".constantize`, `to: "billing/invoices#show"`)
   are real edges, reported separately because no refactoring tool will catch them for you.
   A capitalised string needs a *syntactic* reason to count, though: `default: 'UTC'` is a
