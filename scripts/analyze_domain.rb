@@ -115,6 +115,101 @@ module ExtractScout
     end
   end
 
+  # ------------------------------------------------------------------ targets
+  #
+  # Every remedy this tool suggests presumes a destination. "Promote the concern
+  # to a shared library both sides may depend on" and "confirm the FK in
+  # schema.rb" mean something different, or nothing at all, depending on whether
+  # the domain is moving to another Ruby service, to a pack in the same process,
+  # or to a rewrite in another language.
+  #
+  # The DocuSeal engagement was a Rails -> Node port, and the tool ranked cycles
+  # first: the axis that mattered least, because both sides were being rewritten
+  # together and nothing moved incrementally. Ranking confidently on the wrong
+  # axis is worse than ranking less confidently on the right one.
+  module Targets
+    DEFAULT = 'ruby-service'
+
+    SPECS = {
+      'ruby-service' => {
+        'label' => 'extraction into a separate Ruby service',
+        'weights' => {},
+        'severity' => {},
+        'why' => {},
+        'break_with' => {},
+        'not_analyzed' => [],
+        'caveat' => nil
+      },
+      'modular-monolith' => {
+        'label' => 'a modular monolith -- enforced boundaries, one process',
+        # The boundary is the product, so a leaky facade is the main event. A
+        # cross-boundary association still works at runtime; it is a dependency
+        # to declare, not a join to sever.
+        'weights' => { 'facade_leak' => 80, 'boundary_assoc' => 20, 'shared_mixin' => 15 },
+        'severity' => { 'boundary_assoc' => 'moderate' },
+        'why' => {},
+        'break_with' => {
+          'boundary_assoc' =>
+            'Nothing breaks at runtime -- one process, so the join still works. Declare the ' \
+            'dependency (package.yml, or whatever your boundary tool reads) and decide whether ' \
+            'it is one you want to sanction.',
+          'shared_mixin' =>
+            'A shared concern is a legitimate shared dependency inside one process. Declare it ' \
+            'as one rather than vendoring a second copy.'
+        },
+        'not_analyzed' => [],
+        'caveat' => nil
+      },
+      'other-language' => {
+        'label' => 'a rewrite in another language',
+        # Both sides get reimplemented together, so sequencing pressure drops
+        # and the data layer becomes the specification for the new system.
+        'weights' => { 'cycle' => 45, 'boundary_assoc' => 70, 'string_coupling' => 20,
+                       'shared_mixin' => 10 },
+        'severity' => { 'cycle' => 'major', 'boundary_assoc' => 'major' },
+        'why' => {
+          'cycle' =>
+            'Both directions carry real behaviour. In a rewrite that is a sequencing fact rather ' \
+            'than an obstacle -- neither side can be ported alone, but neither is being moved ' \
+            'incrementally either.'
+        },
+        'break_with' => {
+          'cycle' =>
+            'Both sides are reimplemented together, so this does not block the work -- but it ' \
+            'does mean neither can be ported alone. Treat it as a sequencing constraint on the ' \
+            'rewrite, not a refactor to perform first.',
+          'boundary_assoc' =>
+            'The schema is the specification here, not an obstacle: these are the relationships ' \
+            'the new data model has to reproduce. Read them out of schema.rb and design against ' \
+            'them -- schema analysis itself is out of scope for this tool.',
+          'shared_mixin' =>
+            'There is no shared library across a language boundary. This concern gets ' \
+            'reimplemented on the far side -- count it as new code to write, not as code that ' \
+            'moves.',
+          'string_coupling' =>
+            'You are rewriting rather than refactoring, so no refactoring tool was going to help ' \
+            'anyway. These matter as a checklist of behaviour to reproduce -- grep is enough.'
+        },
+        'not_analyzed' => [
+          'runtime surface: encrypts, serialize, ActiveStorage, app-level defaults',
+          'framework behaviour the new stack has no equivalent for'
+        ],
+        'caveat' =>
+          'This tool ranks the static constant graph. For a cross-language rewrite that is ' \
+          'usually NOT the deciding axis -- the runtime surface is, and it is not modelled here. ' \
+          'Treat the ordering below as a map of the code, not as a migration plan.'
+      }
+    }.freeze
+
+    module_function
+
+    def spec(name)
+      SPECS.fetch(name || DEFAULT) do
+        raise ArgumentError, "unknown --target #{name.inspect}. Valid targets: #{SPECS.keys.join(', ')}"
+      end
+    end
+  end
+
   class Analyzer
     ASSOCIATION_KINDS = %w[association].freeze
 
@@ -127,9 +222,11 @@ module ExtractScout
     BEHAVIORAL_KINDS = %w[reference mixin superclass dsl_string delegation
                           polymorphic_ref].freeze
 
-    def initialize(index, domain, extra_consts: [], extra_files: [])
+    def initialize(index, domain, extra_consts: [], extra_files: [], target: nil)
       @index = index
       @domain = domain
+      @target = target || Targets::DEFAULT
+      @spec = Targets.spec(@target)
       resolved = DomainResolver.new(index).resolve(
         domain, extra_consts: extra_consts, extra_files: extra_files
       )
@@ -224,6 +321,9 @@ module ExtractScout
 
       {
         'domain'  => @domain,
+        'target'        => @target,
+        'target_label'  => @spec['label'],
+        'target_caveat' => @spec['caveat'],
         'files'   => @domain_files.to_a.sort,
         'evidence' => @evidence,
         # The denominator. Saturation constants are absolute -- 10 inbound units
@@ -241,7 +341,7 @@ module ExtractScout
           'transaction boundaries spanning the seam',
           'git co-change (temporal) coupling',
           'runtime config: env vars, feature flags, queues, cron'
-        ],
+        ] + @spec['not_analyzed'],
         'metrics' => {
           'domain_files'        => @domain_files.size,
           'domain_loc'          => @domain_files.sum { |f| @index['files'][f]['loc'] },
@@ -370,6 +470,25 @@ module ExtractScout
       end
     end
 
+    # Target-aware lookups. The seam definitions below state the ruby-service
+    # reading; a target overrides only where that reading is actually wrong for
+    # the destination, so the defaults stay readable in place.
+    def weight(type)
+      @spec['weights'][type] || SEAM_WEIGHTS.fetch(type, 0)
+    end
+
+    def severity_for(type, default)
+      @spec['severity'][type] || default
+    end
+
+    def advice(type, default)
+      @spec['break_with'][type] || default
+    end
+
+    def rationale(type, default)
+      (@spec['why'] || {})[type] || default
+    end
+
     def rank_seams(inbound, outbound, inbound_units, outbound_units,
                    cycle_units, assoc_pair_units, exposed, poly, unbounded,
                    namespace_pair_units, poly_refs)
@@ -387,7 +506,7 @@ module ExtractScout
                    'on both sides. Neither can move until this is one-directional.',
           'break_with' => 'Invert one direction: dependency injection, a domain event, or a ' \
                           'shared interface both sides depend on.',
-          'score' => SEAM_WEIGHTS['cycle'] + into + outof,
+          'score' => weight('cycle') + into + outof,
           'citations' => (inbound_units[unit] + outbound_units[unit]).first(8).map { |c| cite(c) }
         }
       end
@@ -406,7 +525,7 @@ module ExtractScout
           'break_with' => "Confirm the #{unit} files involved do not depend on each other. If they " \
                           'do, this is a cycle and must be inverted; if they do not, split the ' \
                           'namespace so the direction is visible in the structure.',
-          'score' => SEAM_WEIGHTS['namespace_pair'] + into + outof,
+          'score' => weight('namespace_pair') + into + outof,
           'citations' => (inbound_units[unit] + outbound_units[unit]).first(8).map { |c| cite(c) }
         }
       end
@@ -420,7 +539,7 @@ module ExtractScout
                    'Every one of these becomes a public API method or a breaking change.',
           'break_with' => "Introduce #{@domain}::API (or a service object) and route external " \
                           'callers through it, one constant at a time.',
-          'score' => SEAM_WEIGHTS['facade_leak'] + exposed.size * 2,
+          'score' => weight('facade_leak') + exposed.size * 2,
           'detail' => top.map { |const, n| "#{const} (#{n} refs)" },
           'citations' => inbound.sort_by { |c| [c.from_file, c.line] }.first(8).map { |c| cite(c) }
         }
@@ -452,7 +571,7 @@ module ExtractScout
                    "#{ASSOC_MAJOR_PER_FILE}+ is where this stops being ordinary Rails." + pair_note,
           'break_with' => 'Replace traversal with an explicit id column plus a lookup at the ' \
                           'seam. Confirm the FK in schema.rb -- schema analysis is out of scope here.',
-          'score' => SEAM_WEIGHTS['boundary_assoc'] + assoc.size * 3,
+          'score' => weight('boundary_assoc') + assoc.size * 3,
           'citations' => assoc.sort_by { |c| [c.from_file, c.line] }.first(10).map { |c| cite(c) }
         }
       end
@@ -467,7 +586,7 @@ module ExtractScout
                    'every refactoring tool. These break at runtime, in production, not at boot.',
           'break_with' => 'Replace with real constant references before moving anything, so the ' \
                           'rest of the extraction fails loudly instead of silently.',
-          'score' => SEAM_WEIGHTS['string_coupling'] + strings.size * 4,
+          'score' => weight('string_coupling') + strings.size * 4,
           'citations' => strings.first(10).map { |c| cite(c) }
         }
       end
@@ -482,7 +601,7 @@ module ExtractScout
                    'they become duplicated logic or a new shared dependency.',
           'break_with' => 'Vendor the concern into the domain, or promote it to an explicitly ' \
                           'shared library both sides may depend on.',
-          'score' => SEAM_WEIGHTS['shared_mixin'] + mixins.size * 2,
+          'score' => weight('shared_mixin') + mixins.size * 2,
           'citations' => mixins.first(8).map { |c| cite(c) }
         }
       end
@@ -498,9 +617,19 @@ module ExtractScout
           'why' => 'One-directional, so it does not block the split -- but every call site ' \
                    'needs a client-side replacement on cutover day.',
           'break_with' => "Route #{unit} through a single #{@domain} client/adapter first.",
-          'score' => SEAM_WEIGHTS['inbound_volume'] + crossings.size,
+          'score' => weight('inbound_volume') + crossings.size,
           'citations' => crossings.sort_by { |c| [c.from_file, c.line] }.first(6).map { |c| cite(c) }
         }
+      end
+
+      # Apply the destination's reading in one place. The seam literals above
+      # state the ruby-service default; a target overrides only where that
+      # default is actually wrong for where the code is going. Doing it here
+      # rather than per-seam means a seam type added later is covered for free.
+      seams.each do |s|
+        s['severity']   = severity_for(s['type'], s['severity'])
+        s['break_with'] = advice(s['type'], s['break_with'])
+        s['why']        = rationale(s['type'], s['why'])
       end
 
       seams.sort_by { |s| -s['score'] }
@@ -549,7 +678,7 @@ module ExtractScout
                         'concrete type, or an id the extracted service owns. Audit every string ' \
                         'comparison against the type column first -- renaming a model silently ' \
                         'stops matching instead of failing.',
-        'score' => SEAM_WEIGHTS['polymorphic'] + poly.size * 3 + unbounded.size * 5 +
+        'score' => weight('polymorphic') + poly.size * 3 + unbounded.size * 5 +
                    poly_refs.size * 2,
         'citations' => poly.first(6).map { |c| cite(c) } + unbounded.first(3) +
                        poly_refs.first(6).map { |c| cite(c) }
@@ -675,8 +804,9 @@ module ExtractScout
 
   # The headline numbers for one domain. nil when the name resolves to nothing,
   # so a caller can filter_map over a speculative list.
-  def summarize(index, domain, extra_consts: [], extra_files: [])
-    analyzer = Analyzer.new(index, domain, extra_consts: extra_consts, extra_files: extra_files)
+  def summarize(index, domain, extra_consts: [], extra_files: [], target: nil)
+    analyzer = Analyzer.new(index, domain, target: target,
+                                           extra_consts: extra_consts, extra_files: extra_files)
     return nil if analyzer.domain_files.empty?
 
     report = analyzer.analyze
@@ -684,6 +814,7 @@ module ExtractScout
     severity = Verdict.max_severity(report['seams'])
     {
       'domain' => domain,
+      'target' => report['target'],
       'entanglement_score' => score,
       'max_severity' => severity,
       'verdict' => Verdict.verdict(score, severity),
@@ -840,6 +971,14 @@ module ExtractScout
                       m['cycle_units'], headline)
       end
       out << ''
+      target = rows.first['target']
+      if target && target != 'ruby-service'
+        out << ''
+        out << "Ranked for: #{Targets.spec(target)['label']}"
+        caveat = Targets.spec(target)['caveat']
+        out << "! #{caveat}" if caveat
+      end
+      out << ''
       out << 'Ordered by ascending extraction cost. Blocking outranks size: a blocked 2.0'
       out << 'goes after a clean 6.0, because a blocker is a precondition, not a quantity.'
       out << ''
@@ -902,8 +1041,16 @@ module ExtractScout
       scale = indexed ? " of #{indexed} indexed" : ''
       out << "Resolved to #{m['domain_files']} files#{scale} (#{m['domain_loc']} LOC)"
       out << ''
+      out << "TARGET: #{report['target_label']}" if report['target_label']
+      out << ''
       out << "ENTANGLEMENT: #{score}/10 -- #{Verdict.verdict(score, severity)}"
       out << ''
+      if report['target_caveat']
+        # Ahead of the ranking, not after it: this says the ranking may be
+        # measuring the wrong thing, which is not a footnote.
+        out << "  ! #{report['target_caveat']}"
+        out << ''
+      end
       out << format('  Inbound   %s  %d edges from %d units (%d files)',
                     bar(m['inbound_units'], 10), m['inbound_edges'], m['inbound_units'], m['inbound_files'])
       out << format('  Outbound  %s  %d edges to %d units',
@@ -953,11 +1100,20 @@ if __FILE__ == $PROGRAM_NAME
     o.on('--diagnose', 'Report constant-resolution rates for the whole index and exit') { opts[:diagnose] = true }
     o.on('--extra-const NAME', 'Additional constant in this domain (repeatable)') { |v| opts[:extra_consts] << v }
     o.on('--extra-file PATH', 'Additional file in this domain (repeatable)') { |v| opts[:extra_files] << v }
+    o.on('--target NAME', 'Where the domain is going: ruby-service (default), ' \
+                          'modular-monolith, other-language') { |v| opts[:target] = v }
     o.on('--format FMT', 'text (default) or json') { |v| opts[:format] = v }
     o.on('-h', '--help') { puts o; exit 0 }
   end.parse!
 
   abort 'error: --index is required' unless opts[:index]
+
+  # Validate up front, and surface it as a CLI error rather than a backtrace.
+  begin
+    ExtractScout::Targets.spec(opts[:target])
+  rescue ArgumentError => e
+    abort "error: #{e.message}"
+  end
 
   index = JSON.parse(File.read(opts[:index]))
 
@@ -986,7 +1142,7 @@ if __FILE__ == $PROGRAM_NAME
   end
 
   if opts[:summary] || domains.size > 1
-    rows = ExtractScout.rank(domains.filter_map { |d| ExtractScout.summarize(index, d) })
+    rows = ExtractScout.rank(domains.filter_map { |d| ExtractScout.summarize(index, d, target: opts[:target]) })
     missed = domains - rows.map { |r| r['domain'] }
     # Silent truncation reads as "covered everything". Name what did not resolve.
     warn "extract-scout: #{missed.size} of #{domains.size} names resolved to no files: " \
@@ -998,7 +1154,7 @@ if __FILE__ == $PROGRAM_NAME
 
   domain = domains.first
   analyzer = ExtractScout::Analyzer.new(
-    index, domain,
+    index, domain, target: opts[:target],
     extra_consts: opts[:extra_consts], extra_files: opts[:extra_files]
   )
 

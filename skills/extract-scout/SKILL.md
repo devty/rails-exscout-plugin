@@ -23,6 +23,20 @@ Every claim must carry a `file:line`.
 Flags: `--refresh` forces a rebuild of the index cache; `--out PATH` overrides the report
 destination.
 
+**Establish where the domain is going before you rank anything.** The seam ordering and every
+remedy depend on it, and the default assumes extraction into another Ruby service:
+
+| the user is heading for | pass |
+|---|---|
+| a separate Ruby service | `--target ruby-service` (default) |
+| packs/engines in one process | `--target modular-monolith` |
+| a rewrite in another language | `--target other-language` |
+
+If the request does not say, ask — one question, before the analysis. Guessing wrong does not
+degrade the report slightly; it ranks a different axis. If the user does not know or does not
+answer, run the default and **state the assumption in the report's first paragraph**, because
+a reader who assumed otherwise is reading a ranking built for someone else.
+
 ## Step 1 — Preflight
 
 Confirm this is a Ruby/Rails repo and Ruby is available:

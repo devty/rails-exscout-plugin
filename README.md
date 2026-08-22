@@ -240,6 +240,35 @@ Naive constant-graph tools get these wrong, and each error inflates the reported
   calls in and `Ledger::Secret` gets called back, no *file* is on both sides — that is a
   `namespace_pair`, real work but not a precondition.
 
+## Knowing where the code is going
+
+Every remedy presumes a destination. "Promote the concern to a shared library both sides may
+depend on" is good advice for a Ruby service, meaningless across a language boundary, and
+beside the point inside one process. `--target` says which:
+
+```bash
+ruby scripts/analyze_domain.rb --index index.json --domain Billing --target other-language
+```
+
+| target | what changes |
+|---|---|
+| `ruby-service` *(default)* | extraction into a separate Ruby service |
+| `modular-monolith` | one process, enforced boundaries. A cross-boundary association still works at runtime — it is a dependency to declare, not a join to sever — so it drops to `moderate`. A leaky facade becomes the main event, because the boundary *is* the product. |
+| `other-language` | a rewrite. Both sides are reimplemented together, so a cycle stops being a blocker and becomes a sequencing note; the schema stops being an obstacle and becomes the specification the new data model must reproduce; shared concerns are new code to write, not code that moves. |
+
+The most useful thing the tool can say about a cross-language port is that it is ranking the
+wrong axis, so `other-language` leads with that, ahead of the ranking rather than after it:
+
+```
+! This tool ranks the static constant graph. For a cross-language rewrite that is usually
+  NOT the deciding axis -- the runtime surface is, and it is not modelled here. Treat the
+  ordering below as a map of the code, not as a migration plan.
+```
+
+That is not modesty. On a real Rails→Node engagement this tool ranked cycles first, and
+cycles were the axis that mattered least — nothing was moving incrementally, so there was
+nothing to sequence.
+
 ## What it does not analyze
 
 Named in every report, because absence of a finding is not evidence of absence:

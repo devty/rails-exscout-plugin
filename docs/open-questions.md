@@ -316,6 +316,19 @@ few candidates, ranked)?
 
 ### 12. Does the tool know what it is being used *for*?
 
+> **Resolved.** `--target ruby-service|modular-monolith|other-language` now changes seam
+> weights, severities, the `break_with` remedy and the `why` rationale, and extends
+> `not_analyzed`. Under `other-language` a cycle drops from blocker to major (both sides are
+> reimplemented together, so there is nothing to sequence), associations outrank it, and the
+> schema is reframed as the specification rather than an obstacle. Under `modular-monolith`
+> associations drop to moderate and facade leakage becomes the main event.
+>
+> The overrides apply in one post-processing pass rather than threaded through each seam
+> literal, so the defaults stay readable in place and a seam type added later is covered
+> automatically. `other-language` leads with a caveat *ahead of* the ranking saying the
+> ranked axis is probably not the deciding one — which is the honest thing the DocuSeal
+> engagement needed and did not get. 14 tests in `test/test_target.rb`.
+
 Its advice assumes extraction to another Ruby service. The DocuSeal question was extraction to
 **Node**, where "promote the concern to a shared library" and "confirm the FK in schema.rb" mean
 different things or nothing. See blind-spots #10.
