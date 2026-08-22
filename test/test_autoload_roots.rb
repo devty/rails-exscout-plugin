@@ -55,8 +55,17 @@ class TestAutoloadRoots < Minitest::Test
     end
   end
 
-  def test_lib_is_a_root
+  # Rails 7+ does not autoload lib/ unless the app opts in, and a lib/ that is
+  # not autoloaded usually holds gem monkey-patches rather than app constants.
+  def test_lib_is_not_a_root_by_default
     with_repo(APP) do |dir|
+      assert_nil roots_for(dir).constant_for(File.join(dir, 'lib/reporting/exporter.rb'))
+    end
+  end
+
+  def test_lib_is_a_root_when_the_app_opts_in
+    cfg = "module App\n  class Application < Rails::Application\n    config.autoload_lib\n  end\nend\n"
+    with_repo(APP.merge('config/application.rb' => cfg)) do |dir|
       assert_equal 'Reporting::Exporter',
                    roots_for(dir).constant_for(File.join(dir, 'lib/reporting/exporter.rb'))
     end

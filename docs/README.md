@@ -5,8 +5,24 @@ Field notes on `extract-scout`, written from real runs rather than from the sour
 | Document | What it covers |
 |---|---|
 | [`postmortem-docuseal-sweep.md`](postmortem-docuseal-sweep.md) | The 34-model DocuSeal sweep: what held up, six cited defects (D1–D6) with reproduction steps, and ergonomic findings. |
+| [`scope-decisions.md`](scope-decisions.md) | What the tool deliberately refuses to analyze, the evidence for each choice, and the case where it would be wrong. |
 | [`blind-spots.md`](blind-spots.md) | What the tool structurally does not model, split by whether `not_analyzed` discloses it. |
 | [`open-questions.md`](open-questions.md) | Review questions — evaluation methodology, the agent/script split, hook signal-to-noise, product framing. |
+
+## The corpus
+
+Four apps are pinned in [`../test/corpus.json`](../test/corpus.json) with hand-checked
+resolution baselines. Run them with `EXTRACT_SCOUT_CORPUS=~/corpus ruby test/corpus.rb`.
+
+| repo | what it stresses | before → after |
+|---|---|---|
+| [docuseal](https://github.com/docusealco/docuseal) | flat Rails 7, 34 models | source of D1–D6 |
+| [mastodon](https://github.com/mastodon/mastodon) | 18 custom acronyms, AMS serializers | 73% → 95% |
+| [solidus](https://github.com/solidusio/solidus) | engine monorepo, seven gems | 54% → 95% |
+| [chatwoot](https://github.com/chatwoot/chatwoot) | flat app, `enterprise/` overlay | 97%, unchanged |
+
+Chatwoot passing untouched is the only real evidence here that the fixes generalise rather than
+overfit — it is the one repo nothing was tuned against.
 
 ## The short version
 

@@ -63,6 +63,27 @@ WHAT HAS TO BREAK FIRST
 Seams are ordered by **what blocks what**, not by size. Two hundred one-directional call
 sites are tedious; one true cycle is a hard stop.
 
+### The portfolio view
+
+One domain at a time answers "how bad is Billing?". Ranking the whole repo answers the
+question teams actually argue about, and the script does the ranking itself — no model in the
+loop, reproducible run to run:
+
+```bash
+ruby scripts/analyze_domain.rb --index index.json --summary --all
+```
+
+```
+DOMAIN                  SCORE  FILES    IN   OUT  EXPOSED  CYCLES  VERDICT
+Shipping                  0.0      1     0     0        0       0  Clean
+Fulfillment               0.4      1     1     1        1       0  Clean
+Billing                   2.3      2     2     3        2       1  Moderate, BLOCKED
+```
+
+Ordered by ascending cost, with blocking ahead of size — a blocked 2.3 goes after a clean 6.0,
+because a blocker is a precondition rather than a quantity. `--all` takes every namespace in
+the repo, or every top-level unit in a repo that has none; `--domains-from` takes a list.
+
 ## Staying useful after the audit
 
 An audit is a snapshot. The `PostToolUse` hook is the part that keeps the boundary honest
@@ -202,6 +223,14 @@ Naive constant-graph tools get these wrong, and each error inflates the reported
 - `Invoice belongs_to :order` + `Order has_many :invoices` is **not a cycle**. It is one
   relationship declared from both ends — the standard Rails idiom. A true cycle needs
   behavioral edges in both directions.
+- **Custom inflections are read, not guessed.** `inflect.acronym 'API'` makes
+  `app/models/api_key.rb` define `APIKey`; a tool deriving `ApiKey` drops every edge touching
+  it, silently. `config/initializers/inflections.rb` and `zeitwerk.rb` are parsed for
+  `acronym`, `irregular`, `uncountable` and `inflector.inflect` overrides — with Ripper, so a
+  commented-out rule is not a rule.
+- **Packwerk packages are read, not competed with.** When `packs/*/package.yml` exists, those
+  boundaries are the domains, and pack membership is recorded as the strongest evidence a
+  resolution can carry. The team already wrote down the answer this tool otherwise infers.
 - Constants hidden in strings (`"BillingJob".constantize`, `to: "billing/invoices#show"`)
   are real edges, reported separately because no refactoring tool will catch them for you.
   A capitalised string needs a *syntactic* reason to count, though: `default: 'UTC'` is a
@@ -210,6 +239,35 @@ Naive constant-graph tools get these wrong, and each error inflates the reported
 - A namespace with edges in both directions is not automatically a cycle. If `Ledger::Report`
   calls in and `Ledger::Secret` gets called back, no *file* is on both sides — that is a
   `namespace_pair`, real work but not a precondition.
+
+## Knowing where the code is going
+
+Every remedy presumes a destination. "Promote the concern to a shared library both sides may
+depend on" is good advice for a Ruby service, meaningless across a language boundary, and
+beside the point inside one process. `--target` says which:
+
+```bash
+ruby scripts/analyze_domain.rb --index index.json --domain Billing --target other-language
+```
+
+| target | what changes |
+|---|---|
+| `ruby-service` *(default)* | extraction into a separate Ruby service |
+| `modular-monolith` | one process, enforced boundaries. A cross-boundary association still works at runtime — it is a dependency to declare, not a join to sever — so it drops to `moderate`. A leaky facade becomes the main event, because the boundary *is* the product. |
+| `other-language` | a rewrite. Both sides are reimplemented together, so a cycle stops being a blocker and becomes a sequencing note; the schema stops being an obstacle and becomes the specification the new data model must reproduce; shared concerns are new code to write, not code that moves. |
+
+The most useful thing the tool can say about a cross-language port is that it is ranking the
+wrong axis, so `other-language` leads with that, ahead of the ranking rather than after it:
+
+```
+! This tool ranks the static constant graph. For a cross-language rewrite that is usually
+  NOT the deciding axis -- the runtime surface is, and it is not modelled here. Treat the
+  ordering below as a map of the code, not as a migration plan.
+```
+
+That is not modesty. On a real Rails→Node engagement this tool ranked cycles first, and
+cycles were the axis that mattered least — nothing was moving incrementally, so there was
+nothing to sequence.
 
 ## What it does not analyze
 
@@ -317,11 +375,71 @@ one:
 `ruby test/verdict_matrix.rb` prints every headline the report can produce and checks that a
 blocker stays legible at every magnitude.
 
+### The check that finds what unit tests cannot
+
+Every one of the six defects found in the DocuSeal sweep passed the whole suite, because a
+unit test asserts the analyzer does what it was written to do and each defect was a shape the
+fixtures did not contain. Synthetic tests cannot find the case nobody thought of.
+
+What they leave behind is a signature: a misparse fabricates a constant, and a fabricated
+constant resolves to nothing. That is measurable on any repo, with no hand-labelled ground
+truth at all.
+
+```bash
+ruby scripts/analyze_domain.rb --index index.json --diagnose
+```
+
+```
+RESOLUTION DIAGNOSTICS  (304 files indexed)
+
+  KIND            TOTAL   UBIQ  RESOLVED  UNRESOLVED   RATE
+  association       128      0       121           7    95%
+  ...
+
+  ok: no kind is below its resolution floor
+```
+
+Associations name models in the repo, so they should almost all resolve; the floor is 90%
+rather than 100% because STI, gem-provided models and unimplemented interfaces legitimately
+do not. It exits non-zero when a kind drops below its floor. On DocuSeal that number was
+**84.7% while every test was green** — it is the check that would have caught the worst defect
+the day it was written.
+
+`test/corpus.rb` runs those baselines against four real Rails apps pinned in `test/corpus.json`
+— DocuSeal, Mastodon, Solidus and Chatwoot, chosen to stress different conventions. It clones
+nothing: it reports what is missing, prints the command to fetch it, and says how many repos it
+actually checked, so a skipped corpus never reads as a passing one.
+
+| repo | shape | association resolution |
+|---|---|---|
+| Mastodon | 248 models, 18 custom acronyms, AMS serializers throughout | 73% → **95%** |
+| Solidus | engine monorepo, seven gems each with its own `app/` | 54% → **95%** |
+| Chatwoot | flat app with an `enterprise/` overlay | **97%** on first contact |
+
+Chatwoot is the important row: it is the one the tool was never tuned against, and it passed
+without changes. The other two produced nine defects between them in an afternoon — serializer
+macros counted as ActiveRecord associations, `with_options class_name:` ignored, compound
+irregular plurals, `lib/` assumed autoloaded, engine monorepos resolving to *zero* roots,
+inflections declared in a gem's own initializers, constant assignments not counted as
+definitions, and `class ::Foo::Bar` not recognised at all.
+
+Every one of them passed the unit suite. That is the argument for a corpus in one sentence: a
+synthetic fixture can only contain the cases someone thought of.
+
+```bash
+EXTRACT_SCOUT_CORPUS=~/corpus ruby test/corpus.rb
+```
+
 ## Tuning
 
 Three places encode judgment, all deliberately isolated in `scripts/analyze_domain.rb`:
 
 - **`SEAM_WEIGHTS`** — the ordering of what has to break first.
+- **`AMBIENT_MIN_UNITS` / `AMBIENT_STRUCTURAL_PCT`** — what counts as ambient infrastructure
+  rather than coupling. A constant reached widely and almost entirely by `mixin`/`superclass`
+  edges is scaffolding; one reached by `reference`/`association` is a god-model and stays.
+  Argued in full, including where it would be wrong, in
+  [`docs/scope-decisions.md`](docs/scope-decisions.md).
 - **`ASSOC_MAJOR_PER_FILE`** — crossing associations per domain file at which the volume stops
   being ordinary Rails (default 5). Below it the association seam is `moderate`, at or above it
   `major`; it is never a blocker, because volume is work rather than a precondition.

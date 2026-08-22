@@ -12,6 +12,27 @@ Ordered roughly by how hard they are to answer well.
 
 ### 1. What is the false-positive rate, and is it measured anywhere?
 
+> **Resolved.**
+>
+> `--diagnose` reports constant-resolution rates across the whole index and exits non-zero when
+> associations fall below a 90% floor, plus a second tripwire that needs no references at all:
+> under Zeitwerk a booting app cannot declare a constant its path does not imply.
+>
+> `test/corpus.json` now pins four apps rather than one — DocuSeal, Mastodon (248 models, custom
+> acronyms, AMS serializers), Solidus (engine monorepo) and Chatwoot (flat app with an enterprise
+> overlay). Every unresolved association was hand-checked against the source, which is the step
+> that turns a number into evidence.
+>
+> The answer to the original question, measured: **nine defects in an afternoon**, none of which
+> the unit suite could have found, because each was a shape the synthetic fixtures did not
+> contain. Mastodon 73% → 95%, Solidus 54% → 95%. Chatwoot passed at 97% on first contact
+> without any change, which is the closest thing here to evidence the fixes generalise — it is
+> the one repo nothing was tuned against.
+>
+> Remaining honest caveat: four apps is a corpus, not a distribution. Every one is a well-known
+> open-source Rails app, and none is a private enterprise monolith of the kind this tool is
+> actually aimed at.
+
 Measured on this one repo, before the fixes: cycle detection **1 of 1 false**; `string_coupling`
 **8 of 22 false**; association edges **18 of 118 silently dropped**. After D1–D6: no known false
 positive, string refs 100% genuine, 7 deliberate drops.
@@ -45,6 +66,13 @@ through a model instructed to trust tool output.
 
 ### 3. Is the score comparable across repos, or only within one?
 
+> **Resolved as documentation, not code.** The constants are absolute on purpose — ten inbound
+> units is ten client adapters whether the repo has 34 models or 400 — so the score travels as an
+> *effort* estimate and does not travel as a *percentile*. Normalising by repo size was rejected:
+> it would change a domain's difficulty when someone adds unrelated models elsewhere. Reports now
+> print `N files of M indexed` so the denominator is visible, and the skill has a "Reading the
+> score" section. The 23-of-34-Clean cluster is re-read as accurate signal about a flat app.
+
 `Verdict.score` saturation constants are absolute: 3 cycle units, 12 exposed constants, 10 inbound
 units, 10 boundary associations, 12 outbound units, 5 string couplings.
 
@@ -58,6 +86,25 @@ lands in one bucket has limited resolution — though this may be honest signal,
 models genuinely are leaves.
 
 ### 4. What happens on a repo the conventions do not fit?
+
+> **Mostly resolved.**
+>
+> *Inflections* — `config/initializers/inflections.rb` and `zeitwerk.rb` are now parsed for
+> `acronym`, `irregular`, `uncountable` and `inflector.inflect` overrides, via Ripper so a
+> commented-out rule is not a rule. Backed by a second tripwire that needs no references at
+> all: under Zeitwerk a booting app cannot declare a constant its path does not imply, so
+> every such mismatch is proof of a rule the index does not know. `--diagnose` names the
+> file, both constants, and the initializer to check.
+>
+> *Packwerk* — answered in the direction the question suggested: read `package.yml` rather
+> than compete with it. Packs become the candidate domains, and `pack` is now the strongest
+> value in the `evidence` map, above `namespace`.
+>
+> *Still open* — Packwerk's `dependencies:` list is read but not yet used. It is declared
+> ground truth about which crossings are sanctioned, which would let a seam distinguish
+> "this edge violates a stated boundary" from "this edge is allowed and still has to move".
+> Non-Rails Ruby also still degrades quietly rather than announcing that path resolution is
+> weak, though `--diagnose` now makes the degradation measurable.
 
 `DEFAULT_EXCLUDES`, `DEFAULT_UBIQUITOUS` and the autoload-root globs encode Rails conventions.
 DocuSeal is textbook Rails, so this was never tested in anger. Open:
@@ -80,6 +127,16 @@ D1 (see blind-spots #11).
 
 ### 5. Is the boundary between script and agent in the right place?
 
+> **Partly resolved.** What moved: the ranking arithmetic (Q6) and both agent dispatch triggers
+> (Q7, Q8). The seam prose is no longer frozen either — `Targets` (Q12) overrides `severity`,
+> `break_with` and `why` per destination in one post-processing pass over the ranked seams.
+>
+> Still open, and the mechanism to fix it now exists: that pass varies the prose by *target*,
+> not by *evidence*. The original complaint stands — "constantized strings break at runtime, in
+> production" was attached to 8 `class_name:` options for which it is false. The same hook that
+> takes a target could take the seam's own citations and pick wording that fits what they
+> actually are.
+
 The split is mostly excellent and worth keeping as a reference design: **parsing and graph math are
 deterministic; boundary judgment and call-site interpretation are agents.** Ripper tokenizing is
 exactly what a model should not be doing, and "does `Invoice` belong to Billing" is exactly what a
@@ -99,6 +156,12 @@ citations turn out to be.
 
 ### 6. Why is the model doing arithmetic the script should own?
 
+> **Resolved.** `analyze_domain.rb` gained `--summary`, `--domains-from` and `--all`. It resolves,
+> scores and ranks a whole candidate set in one invocation and prints the table directly, with the
+> `NOT ANALYZED` clause attached. `--all` doubles as the portfolio view Q11 asks for. Ranking is
+> reproducible without a model, and names that resolve to nothing are reported rather than
+> silently dropped. 12 tests in `test/test_summary.rb`.
+
 The sweep produced 34 JSON files, aggregated with ad-hoc Ruby one-liners written in the conversation:
 sorting by score, grouping severity, computing hub/leaf tiers, building the markdown table. All
 deterministic, all re-derived from scratch, all consuming model context.
@@ -107,6 +170,11 @@ A `--summary` / `--domains-from` mode would move it into the script, make the ra
 without a model, and remove a class of transcription error. See postmortem § Ergonomics.
 
 ### 7. Should Step 4's skip threshold be on file count?
+
+> **Resolved.** Re-keyed onto seam severity: any `blocker` always dispatches the seam analyst
+> however few files resolved, two or more `major` seams dispatch, and a domain with only
+> `moderate` seams is read directly. A one-file domain with a cycle is exactly the case that
+> needed the agent and exactly the case the old file-count gate skipped.
 
 The SKILL skips seam-analyst dispatch below ~5 files. Every DocuSeal domain was 1 file, so the agent
 layer — described in the skill's own preamble as the point of the report — never ran across 34
@@ -117,6 +185,10 @@ and that file count is the wrong axis; **seam count or severity** would be bette
 with a `blocker` cycle is exactly when you want a human-grade read of the call sites.
 
 ### 8. What does the boundary-resolver trigger actually key on?
+
+> **Resolved.** Both skills now trigger on the `evidence` map rather than the file count.
+> `namespace` or `constant` + `path` is exact and dispatches nothing; `path` alone is a possible
+> name coincidence and dispatches. A flat 34-model app now dispatches zero agents instead of 34.
 
 Both skills say *"fewer than 3 files resolved → dispatch `rails-boundary-resolver`"*, and
 `extract-compare` strengthens it to *every* such domain. All 34 DocuSeal domains resolved to one file
@@ -256,6 +328,19 @@ across all domains — sitting between `/extract-scout` (one domain, deep) and `
 few candidates, ranked)?
 
 ### 12. Does the tool know what it is being used *for*?
+
+> **Resolved.** `--target ruby-service|modular-monolith|other-language` now changes seam
+> weights, severities, the `break_with` remedy and the `why` rationale, and extends
+> `not_analyzed`. Under `other-language` a cycle drops from blocker to major (both sides are
+> reimplemented together, so there is nothing to sequence), associations outrank it, and the
+> schema is reframed as the specification rather than an obstacle. Under `modular-monolith`
+> associations drop to moderate and facade leakage becomes the main event.
+>
+> The overrides apply in one post-processing pass rather than threaded through each seam
+> literal, so the defaults stay readable in place and a seam type added later is covered
+> automatically. `other-language` leads with a caveat *ahead of* the ranking saying the
+> ranked axis is probably not the deciding one — which is the honest thing the DocuSeal
+> engagement needed and did not get. 14 tests in `test/test_target.rb`.
 
 Its advice assumes extraction to another Ruby service. The DocuSeal question was extraction to
 **Node**, where "promote the concern to a shared library" and "confirm the FK in schema.rb" mean

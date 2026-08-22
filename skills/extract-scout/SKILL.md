@@ -23,6 +23,20 @@ Every claim must carry a `file:line`.
 Flags: `--refresh` forces a rebuild of the index cache; `--out PATH` overrides the report
 destination.
 
+**Establish where the domain is going before you rank anything.** The seam ordering and every
+remedy depend on it, and the default assumes extraction into another Ruby service:
+
+| the user is heading for | pass |
+|---|---|
+| a separate Ruby service | `--target ruby-service` (default) |
+| packs/engines in one process | `--target modular-monolith` |
+| a rewrite in another language | `--target other-language` |
+
+If the request does not say, ask — one question, before the analysis. Guessing wrong does not
+degrade the report slightly; it ranks a different axis. If the user does not know or does not
+answer, run the default and **state the assumption in the report's first paragraph**, because
+a reader who assumed otherwise is reading a ranking built for someone else.
+
 ## Step 1 — Preflight
 
 Confirm this is a Ruby/Rails repo and Ruby is available:
@@ -57,21 +71,42 @@ probably wrong for this repo — check `autoload_roots` before continuing.
 
 ```bash
 ruby "${CLAUDE_PLUGIN_ROOT}/scripts/analyze_domain.rb" \
-  --index "$CACHE/index.json" --domain "$1" --format json
+  --index "$CACHE/index.json" --domain "$1" --format brief
 ```
+
+**Use `--format brief`, not `--format json`.** They carry the same findings; `brief` replaces
+the per-file evidence map with a tally and caps citations per seam. On a large domain the full
+report is ~64k tokens and `brief` is ~10k, for decisions that never needed the difference — the
+boundary question is *how* files matched, never *which file matched which way*. Reach for
+`--format json` only when you need a citation `brief` capped away.
 
 The script resolves mechanically: namespace match, constant-prefix match, path-segment
 match. That is sufficient for a namespaced domain (`app/models/billing/**`).
 
 **It is not sufficient for the common case where a domain is conceptual rather than
 namespaced** — where `Invoice`, `LedgerEntry` and `Receipt` are all Billing but none is
-under a `Billing::` namespace. Dispatch the `rails-boundary-resolver` agent when any of
-these hold:
+under a `Billing::` namespace.
 
-- the script exits with "matched no files"
-- fewer than 3 files resolved
-- `evidence` shows only `path` matches (name coincidence, not structure)
-- the user named a business concept with no matching namespace
+**Trigger the `rails-boundary-resolver` agent on the `evidence` map, not on the file count.**
+Most Rails apps are flat, so a one-file result is the norm rather than a warning sign — a
+file-count trigger dispatches an agent against boundaries that were already exact. What
+`evidence` records is *how* each file was matched, which is the thing that actually
+distinguishes a resolved boundary from a lucky guess:
+
+`evidence_tally` groups files by the combination that matched them, so real values look like
+`constant+namespace` or `path` — read the strongest signal present, not an exact row match:
+
+| strongest signal in the combination | reading | action |
+|---|---|---|
+| `pack` | a declared Packwerk boundary — the team wrote it down | no agent |
+| `namespace` | the domain is a real namespace | no agent |
+| `constant` | name and structure agree | no agent |
+| `path` alone, with nothing else | could be a name coincidence | **dispatch** |
+| `agent:*` alone | a previous run's judgment, not structure | **dispatch** |
+| script exits "matched no files" | nothing resolved | **dispatch** |
+
+Also dispatch when the user named a business concept with no matching namespace, regardless
+of what resolved — that is the case the agent exists for.
 
 Pass the agent the domain name and the index path. It returns constants and files to feed
 back as `--extra-const` / `--extra-file`, then re-run the analysis. Report what the agent
@@ -80,12 +115,30 @@ number that follows.
 
 ## Step 4 — Ground the top seams in real code
 
-The script reports graph structure. It does not know what the code *means*. For the top 3
-seams, dispatch the `rails-seam-analyst` agent with those citations to read the actual call
-sites and report what breaking each seam concretely requires.
+The script reports graph structure. It does not know what the code *means*. Dispatch the
+`rails-seam-analyst` agent with the citations from the seams that matter, to read the actual
+call sites and report what breaking each one concretely requires.
 
-Skip this only when the domain resolves to fewer than ~5 files and the seam list is short
-enough to read directly. In that case read the cited files yourself with Read.
+**How many is "the seams that matter" depends on the domain, not on a fixed number.** A
+1-file domain may have one seam; Mastodon's `ActivityPub` has 26 blockers. Reading three of
+twenty-six and calling the result "what has to break first" understates the job by an order of
+magnitude.
+
+- Dispatch on the **blocker** seams, up to 5 agents run concurrently in one message.
+- Fewer than 3 blockers → top up with `major` seams to 3.
+- **Always state the ratio in the report**: "read 5 of 26 blockers in depth; the remaining 21
+  are listed with citations but not analyzed." A number the reader can check beats a summary
+  that silently sampled.
+
+**Decide this on the seams, not on the file count.** A one-file domain with a `blocker` seam
+is exactly when a human-grade read of the call sites is worth most — whether that cycle is a
+one-line injection or a redesign is invisible in the graph and decides the whole estimate.
+Gating on size skips the agent precisely where a small, dense domain needs it.
+
+- Any seam at `blocker` severity → **always dispatch**, however few files resolved.
+- Two or more seams at `major` → dispatch.
+- Only `moderate` seams, or none → read the cited files yourself with Read. There is little
+  for the agent to add when nothing is blocking.
 
 ## Step 5 — Write the report
 
@@ -149,6 +202,27 @@ Tell the user the file was written, that it is worth committing, and that the ho
 until they set `"enforce": true` on the boundaries they actually want defended. If this write
 adds more than a handful of domains at once, say so explicitly — that is a measurement sweep,
 not an architecture decision, and enforcing all of it would be a mistake.
+
+## Reading the score
+
+The score estimates **how much work**, on an absolute scale. Its saturation constants are
+absolute deliberately: ten inbound units means ten client adapters to write on cutover day,
+and that is the same amount of work in a 34-model app as in a 400-model one. The number does
+travel across repos as an effort estimate.
+
+What does **not** travel is reading it as a percentile. On a small app a 4.7 is an outlier; on
+a large one it is unremarkable. The report prints the domain's size against the indexed repo —
+`Resolved to 4 files of 304 indexed` — so the reader can tell which they are looking at. Quote
+that alongside the score whenever the number leaves the report.
+
+Two consequences worth stating in the report when they apply:
+
+- **A cluster at the bottom is signal, not poor resolution.** In a flat Rails app most models
+  genuinely are leaves, and a scale that puts two-thirds of them under 2.0 is describing the
+  app accurately. Say that, rather than letting it read as the tool failing to discriminate.
+- **The score never encodes blocking.** A 1.1 with a `blocker` is a harder job than a 6.0
+  without one. That is why the headline carries both, and why `/extract-compare` ranks on
+  `max_severity` before score.
 
 ## Rules
 
