@@ -28,6 +28,33 @@ module ExtractScout
 
   TEST_DIRS = %w[spec test features].freeze
 
+  # Ambient infrastructure: a constant so widely reached that its presence in one
+  # domain's report says nothing about that domain. A concern included by 52 of an
+  # app's 60 units is not coupling to be broken -- it is already a shared library,
+  # and "promote it to a shared library" is unactionable advice.
+  #
+  # Measured rather than listed, because a list of framework names rots with every
+  # Rails release while "reached by most of the app" stays true by construction.
+  # This is the same principle the resolver already applies to gem code ("not
+  # defined in this repo") extended to code that IS defined here.
+  #
+  # A ratio travels across repo sizes where a fixed count does not; the absolute
+  # floor stops a six-unit app from manufacturing infrastructure out of noise; and
+  # the measurable minimum stops the ratio being computed where it is meaningless.
+  # Edges that say "this constant is scaffolding I am built ON", as opposed to
+  # "this constant is a thing I use". The distinction is what separates a shared
+  # concern from a god-model, and on real code it is bimodal: Mastodon's
+  # ApplicationRecord is 93% structural and BaseService, Redisable and
+  # RoutingHelper are 100%, while Account, Status, User and Tag are all 0%.
+  #
+  # Breadth alone cannot tell them apart -- Account has the WIDEST reach in the
+  # app at 171 units, and it is the single most important coupling fact there,
+  # not noise. A breadth-only rule deletes the headline.
+  STRUCTURAL_KINDS = %w[mixin superclass].freeze
+  AMBIENT_STRUCTURAL_PCT = 90
+  AMBIENT_MIN_UNITS = 10
+  AMBIENT_MEASURABLE_MIN = 12
+
   ASSOCIATION_MACROS = %w[belongs_to has_many has_one has_and_belongs_to_many].freeze
   MIXIN_MACROS       = %w[include extend prepend].freeze
 
@@ -963,6 +990,7 @@ module ExtractScout
 
       resolve_polymorphic_edges(files, impl_index)
       namespaces = derive_namespaces(files)
+      ambient = derive_ambient(files)
 
       {
         'schema_version' => 1,
@@ -980,7 +1008,8 @@ module ExtractScout
             'overrides' => @inflections[:overrides].size
           }
         },
-        'ubiquitous'     => @ubiquitous.to_a.sort,
+        'ubiquitous'     => (@ubiquitous.to_a + ambient.keys).uniq.sort,
+        'ambient'        => ambient,
         'namespaces'     => namespaces,
         'packs'          => @packs,
         'constants'      => const_to_files,
@@ -1007,6 +1036,47 @@ module ExtractScout
             }
           end
         end
+      end
+    end
+
+    # Constants reached by so much of the app that they are ambient rather than
+    # coupled. Breadth is counted in distinct top-level units, not files: one unit
+    # including a concern from thirty of its own files is still one dependency.
+    def derive_ambient(files)
+      units = files.each_value.filter_map { |m| m['primary_const']&.split('::')&.first }.uniq
+      return {} if units.size < AMBIENT_MEASURABLE_MIN
+
+      reach = Hash.new { |h, k| h[k] = Set.new }
+      kinds = Hash.new { |h, k| h[k] = Hash.new(0) }
+
+      files.each_value do |meta|
+        unit = meta['primary_const']&.split('::')&.first
+        next if unit.nil?
+
+        meta['refs'].each do |ref|
+          # A unit reaching its own name is not reach.
+          next if ref['const'].split('::').first == unit
+
+          reach[ref['const']] << unit
+          kinds[ref['const']][ref['kind']] += 1
+        end
+      end
+
+      reach.each_with_object({}) do |(const, hitters), out|
+        next if hitters.size < AMBIENT_MIN_UNITS
+
+        edges = kinds[const]
+        total = edges.values.sum
+        next if total.zero?
+
+        structural = edges.select { |k, _| STRUCTURAL_KINDS.include?(k) }.values.sum
+        pct = (structural * 100.0 / total).round
+        next if pct < AMBIENT_STRUCTURAL_PCT
+
+        out[const] = {
+          'units' => hitters.size, 'of' => units.size,
+          'structural_pct' => pct, 'min_units' => AMBIENT_MIN_UNITS
+        }
       end
     end
 

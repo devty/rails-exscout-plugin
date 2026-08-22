@@ -5,6 +5,7 @@ Field notes on `extract-scout`, written from real runs rather than from the sour
 | Document | What it covers |
 |---|---|
 | [`postmortem-docuseal-sweep.md`](postmortem-docuseal-sweep.md) | The 34-model DocuSeal sweep: what held up, six cited defects (D1–D6) with reproduction steps, and ergonomic findings. |
+| [`scope-decisions.md`](scope-decisions.md) | What the tool deliberately refuses to analyze, the evidence for each choice, and the case where it would be wrong. |
 | [`blind-spots.md`](blind-spots.md) | What the tool structurally does not model, split by whether `not_analyzed` discloses it. |
 | [`open-questions.md`](open-questions.md) | Review questions — evaluation methodology, the agent/script split, hook signal-to-noise, product framing. |
 

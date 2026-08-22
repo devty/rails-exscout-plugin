@@ -27,6 +27,17 @@ plugin is `0.x`, minor bumps may change behaviour.
 
 ### Added
 
+- **Ambient infrastructure is set aside before counting.** A constant reached by 10+ units
+  whose edges are 90%+ `mixin`/`superclass` is scaffolding, not coupling — reported under
+  `AMBIENT` with the numbers that justified it, and excluded from seams and the score. It
+  subsumes the hardcoded ubiquitous list and finds what that list missed. Breadth alone is
+  deliberately not the rule: Mastodons widest-reach constant is `Account`, the god-model,
+  and a breadth-only rule would delete the most important finding in the app. See
+  [`docs/scope-decisions.md`](docs/scope-decisions.md).
+- **Seams order by severity tier, then size.** The README always promised "ordered by what
+  blocks what, not by size"; scores had no saturation, so on ActivityPub one `moderate` seam
+  outranked twenty-six blockers.
+
 - `--summary`, `--all` and `--domains-from` rank a whole candidate set in one invocation and
   print the ordered table directly. `--all` doubles as a portfolio view over the repo.
 - `--diagnose` reports constant-resolution rates per edge kind and exits non-zero when

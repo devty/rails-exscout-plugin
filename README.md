@@ -435,6 +435,11 @@ EXTRACT_SCOUT_CORPUS=~/corpus ruby test/corpus.rb
 Three places encode judgment, all deliberately isolated in `scripts/analyze_domain.rb`:
 
 - **`SEAM_WEIGHTS`** — the ordering of what has to break first.
+- **`AMBIENT_MIN_UNITS` / `AMBIENT_STRUCTURAL_PCT`** — what counts as ambient infrastructure
+  rather than coupling. A constant reached widely and almost entirely by `mixin`/`superclass`
+  edges is scaffolding; one reached by `reference`/`association` is a god-model and stays.
+  Argued in full, including where it would be wrong, in
+  [`docs/scope-decisions.md`](docs/scope-decisions.md).
 - **`ASSOC_MAJOR_PER_FILE`** — crossing associations per domain file at which the volume stops
   being ordinary Rails (default 5). Below it the association seam is `moderate`, at or above it
   `major`; it is never a blocker, because volume is work rather than a precondition.

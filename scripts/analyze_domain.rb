@@ -241,12 +241,21 @@ module ExtractScout
       inbound  = []
       outbound = []
       internal = 0
+      ambient_index = @index['ambient'] || {}
+      ambient_hits = {}
 
       @index['files'].each do |rel, meta|
         from_ns = namespace_of(meta['primary_const'])
         from_is_domain = @domain_files.include?(rel)
 
         meta['refs'].each do |ref|
+          # Record ambient reach before resolution drops it, so the report can
+          # show what was set aside rather than silently omitting it.
+          if from_is_domain && (info = ambient_index[ref['const']])
+            ambient_hits[ref['const']] ||= info.merge('edges' => 0)
+            ambient_hits[ref['const']]['edges'] += 1
+          end
+
           hit = @resolver.resolve(ref['const'], from_ns)
           next unless hit
 
@@ -274,7 +283,7 @@ module ExtractScout
         end
       end
 
-      build_report(inbound, outbound, internal)
+      build_report(inbound, outbound, internal, ambient_hits)
     end
 
     private
@@ -291,7 +300,7 @@ module ExtractScout
       const.include?('::') ? const.split('::').first : const
     end
 
-    def build_report(inbound, outbound, internal)
+    def build_report(inbound, outbound, internal, ambient_hits = {})
       inbound_units  = inbound.group_by { |c| unit_of(c.from_const) }
       outbound_units = outbound.group_by { |c| unit_of(c.to_const) }
 
@@ -322,6 +331,9 @@ module ExtractScout
       {
         'domain'  => @domain,
         'target'        => @target,
+        # Set aside is not ignored. A reader has to see what was removed from
+        # the graph before the numbers were taken, and be able to disagree.
+        'ambient'       => ambient_hits,
         'target_label'  => @spec['label'],
         'target_caveat' => @spec['caveat'],
         'files'   => @domain_files.to_a.sort,
@@ -632,7 +644,7 @@ module ExtractScout
         s['why']        = rationale(s['type'], s['why'])
       end
 
-      seams.sort_by { |s| -s['score'] }
+      Analyzer.order_seams(seams)
     end
 
     # Ranked just below a cycle. A cycle stops you drawing the boundary at all;
@@ -683,6 +695,19 @@ module ExtractScout
         'citations' => poly.first(6).map { |c| cite(c) } + unbounded.first(3) +
                        poly_refs.first(6).map { |c| cite(c) }
       }
+    end
+  end
+
+  class Analyzer
+    # "Seams are ordered by what blocks what, not by size." Ordering on score
+    # alone did not deliver that: seam scores have no saturation, so
+    # shared_mixin (35 + mixins*2 = 231 on Mastodon's ActivityPub) outranked a
+    # cycle (100 + edges = 135) -- one moderate seam above twenty-six blockers.
+    #
+    # Severity IS what-blocks-what, so it is the primary key and score orders
+    # within a tier. No amount of volume can lift a moderate seam over a blocker.
+    def self.order_seams(seams)
+      seams.sort_by { |s| [-Verdict::SEVERITY_RANK.fetch(s['severity'], 0), -s['score']] }
     end
   end
 
@@ -1073,6 +1098,16 @@ module ExtractScout
         out << "     Break with: #{seam['break_with']}"
         (seam['citations'] || []).first(4).each do |c|
           out << "       - #{c['at']}  #{c['kind']}  -> #{c['to']}"
+        end
+        out << ''
+      end
+      ambient = report['ambient'] || {}
+      unless ambient.empty?
+        out << 'AMBIENT (set aside before counting -- reached by most of the app, so not this'
+        out << "domain's coupling. Argue with the threshold if you disagree; see docs/scope-decisions.md):"
+        ambient.sort_by { |_, v| -v['edges'] }.first(10).each do |const, v|
+          out << format('  - %-30s %d edges here, reached by %d of %d units',
+                        const, v['edges'], v['units'], v['of'])
         end
         out << ''
       end
