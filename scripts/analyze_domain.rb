@@ -857,6 +857,52 @@ module ExtractScout
     end
   end
 
+  # --------------------------------------------------------------------- brief
+  #
+  # The full JSON report carries every citation and a per-file evidence map. On
+  # Mastodon's ActivityPub that is 271 KB -- roughly 68k tokens -- and the skill
+  # asked a model to read all of it to answer one question: how did the boundary
+  # resolve. It scales with domain size, so the cost is worst on exactly the
+  # domains most worth scouting.
+  #
+  # Same principle as moving the ranking arithmetic into the script: the tool
+  # should hand over what the decision needs, not everything it happens to know.
+  BRIEF_CITATIONS = 4
+
+  module_function
+
+  def brief(report)
+    tally = Hash.new(0)
+    (report['evidence'] || {}).each_value { |how| tally[Array(how).sort.join('+')] += 1 }
+
+    score = report['entanglement_score'] || Verdict.score(report['metrics'])
+    severity = report['max_severity'] || Verdict.max_severity(report['seams'])
+
+    {
+      'domain' => report['domain'],
+      'target' => report['target'],
+      'target_label' => report['target_label'],
+      'target_caveat' => report['target_caveat'],
+      'repo' => report['repo'],
+      'file_count' => (report['files'] || []).size,
+      # The tally, not the map: the decision was always about how files matched,
+      # never about which file matched which way.
+      'evidence_tally' => tally,
+      'metrics' => report['metrics'],
+      # Derived rather than copied: only the CLI stamps these onto the report,
+      # so a brief taken straight off Analyzer#analyze would carry nils.
+      'entanglement_score' => score,
+      'max_severity' => severity,
+      'verdict' => report['verdict'] || Verdict.verdict(score, severity),
+      'seams' => (report['seams'] || []).map do |s|
+        s.merge('citations' => (s['citations'] || []).first(BRIEF_CITATIONS))
+      end,
+      'cycles' => (report['cycles'] || []).map { |c| c['unit'] },
+      'ambient' => (report['ambient'] || {}).keys,
+      'not_analyzed' => report['not_analyzed']
+    }
+  end
+
   # ---------------------------------------------------------------- diagnostics
   #
   # The eval that generalises without hand-labelled ground truth.
@@ -971,6 +1017,8 @@ module ExtractScout
   # -------------------------------------------------------------------- render
 
   module Render
+    SEAM_RENDER_CAP = 12
+
     module_function
 
     def bar(value, full, width = 10)
@@ -1092,7 +1140,11 @@ module ExtractScout
       out << ''
       out << 'WHAT HAS TO BREAK FIRST'
       out << ''
-      report['seams'].each_with_index do |seam, idx|
+      # A "terminal summary" that renders 32 seams over 267 lines is not one.
+      # Capping is fine; capping silently is not, because a truncated list reads
+      # as a complete one.
+      shown = report['seams'].first(SEAM_RENDER_CAP)
+      shown.each_with_index do |seam, idx|
         out << format('  %d. [%s] %s', idx + 1, seam['severity'].upcase, seam['title'])
         out << "     #{seam['why']}"
         out << "     Break with: #{seam['break_with']}"
@@ -1101,6 +1153,17 @@ module ExtractScout
         end
         out << ''
       end
+      if report['seams'].size > shown.size
+        hidden = report['seams'].size - shown.size
+        by_sev = report['seams'].drop(shown.size).group_by { |s| s['severity'] }
+                                .transform_values(&:size)
+                                .sort_by { |sev, _| -Verdict::SEVERITY_RANK.fetch(sev, 0) }
+                                .map { |sev, n| "#{n} #{sev}" }.join(', ')
+        out << "  ... #{hidden} more of #{report['seams'].size} seams not shown (#{by_sev})."
+        out << '      Use --format json for all of them; they are ranked, not truncated at random.'
+        out << ''
+      end
+
       ambient = report['ambient'] || {}
       unless ambient.empty?
         out << 'AMBIENT (set aside before counting -- reached by most of the app, so not this'
@@ -1137,7 +1200,7 @@ if __FILE__ == $PROGRAM_NAME
     o.on('--extra-file PATH', 'Additional file in this domain (repeatable)') { |v| opts[:extra_files] << v }
     o.on('--target NAME', 'Where the domain is going: ruby-service (default), ' \
                           'modular-monolith, other-language') { |v| opts[:target] = v }
-    o.on('--format FMT', 'text (default) or json') { |v| opts[:format] = v }
+    o.on('--format FMT', 'text (default), json, or brief (json without the bulk)') { |v| opts[:format] = v }
     o.on('-h', '--help') { puts o; exit 0 }
   end.parse!
 
@@ -1205,5 +1268,9 @@ if __FILE__ == $PROGRAM_NAME
     report['entanglement_score'], report['max_severity']
   )
 
-  puts opts[:format] == 'json' ? JSON.pretty_generate(report) : ExtractScout::Render.text(report)
+  case opts[:format]
+  when 'json'  then puts JSON.pretty_generate(report)
+  when 'brief' then puts JSON.pretty_generate(ExtractScout.brief(report))
+  else              puts ExtractScout::Render.text(report)
+  end
 end

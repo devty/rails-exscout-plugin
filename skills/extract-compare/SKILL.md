@@ -40,8 +40,9 @@ ruby "${CLAUDE_PLUGIN_ROOT}/scripts/analyze_domain.rb" \
   --index "$CACHE/index.json" --domains-from "$CACHE/candidates.txt" --summary
 ```
 
-Add `--format json` when you need each domain's `metrics`, `max_severity`, `evidence` and
-`seams` to write the prose. Use `--all` in place of `--domains-from` for a portfolio pass over
+Add `--format brief` when you need each domain's `metrics`, `max_severity`, `evidence_tally`
+and `seams` to write the prose. It carries the same findings as `--format json` at roughly a
+sixth the size, which matters when you are holding several domains at once. Use `--all` in place of `--domains-from` for a portfolio pass over
 every namespace in the repo — or every top-level unit, in a repo that has no namespaces.
 
 Names that resolve to no files are reported on stderr and left out of the table. Name them

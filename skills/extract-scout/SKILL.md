@@ -71,8 +71,14 @@ probably wrong for this repo — check `autoload_roots` before continuing.
 
 ```bash
 ruby "${CLAUDE_PLUGIN_ROOT}/scripts/analyze_domain.rb" \
-  --index "$CACHE/index.json" --domain "$1" --format json
+  --index "$CACHE/index.json" --domain "$1" --format brief
 ```
+
+**Use `--format brief`, not `--format json`.** They carry the same findings; `brief` replaces
+the per-file evidence map with a tally and caps citations per seam. On a large domain the full
+report is ~64k tokens and `brief` is ~10k, for decisions that never needed the difference — the
+boundary question is *how* files matched, never *which file matched which way*. Reach for
+`--format json` only when you need a citation `brief` capped away.
 
 The script resolves mechanically: namespace match, constant-prefix match, path-segment
 match. That is sufficient for a namespaced domain (`app/models/billing/**`).
@@ -87,12 +93,16 @@ file-count trigger dispatches an agent against boundaries that were already exac
 `evidence` records is *how* each file was matched, which is the thing that actually
 distinguishes a resolved boundary from a lucky guess:
 
-| evidence | reading | action |
+`evidence_tally` groups files by the combination that matched them, so real values look like
+`constant+namespace` or `path` — read the strongest signal present, not an exact row match:
+
+| strongest signal in the combination | reading | action |
 |---|---|---|
 | `pack` | a declared Packwerk boundary — the team wrote it down | no agent |
 | `namespace` | the domain is a real namespace | no agent |
-| `constant` + `path` | name and structure agree | no agent |
-| `path` only | could be a name coincidence | **dispatch** |
+| `constant` | name and structure agree | no agent |
+| `path` alone, with nothing else | could be a name coincidence | **dispatch** |
+| `agent:*` alone | a previous run's judgment, not structure | **dispatch** |
 | script exits "matched no files" | nothing resolved | **dispatch** |
 
 Also dispatch when the user named a business concept with no matching namespace, regardless
@@ -105,9 +115,20 @@ number that follows.
 
 ## Step 4 — Ground the top seams in real code
 
-The script reports graph structure. It does not know what the code *means*. For the top 3
-seams, dispatch the `rails-seam-analyst` agent with those citations to read the actual call
-sites and report what breaking each seam concretely requires.
+The script reports graph structure. It does not know what the code *means*. Dispatch the
+`rails-seam-analyst` agent with the citations from the seams that matter, to read the actual
+call sites and report what breaking each one concretely requires.
+
+**How many is "the seams that matter" depends on the domain, not on a fixed number.** A
+1-file domain may have one seam; Mastodon's `ActivityPub` has 26 blockers. Reading three of
+twenty-six and calling the result "what has to break first" understates the job by an order of
+magnitude.
+
+- Dispatch on the **blocker** seams, up to 5 agents run concurrently in one message.
+- Fewer than 3 blockers → top up with `major` seams to 3.
+- **Always state the ratio in the report**: "read 5 of 26 blockers in depth; the remaining 21
+  are listed with citations but not analyzed." A number the reader can check beats a summary
+  that silently sampled.
 
 **Decide this on the seams, not on the file count.** A one-file domain with a `blocker` seam
 is exactly when a human-grade read of the call sites is worth most — whether that cycle is a

@@ -34,6 +34,10 @@ plugin is `0.x`, minor bumps may change behaviour.
   deliberately not the rule: Mastodons widest-reach constant is `Account`, the god-model,
   and a breadth-only rule would delete the most important finding in the app. See
   [`docs/scope-decisions.md`](docs/scope-decisions.md).
+- **`--format brief`** — the same findings as `--format json` with the per-file evidence map
+  replaced by a tally and citations capped. ~64k tokens to ~10k on a large domain, for
+  decisions that never needed the difference. The terminal report also caps its seam list,
+  and says how many it hid and at what severity rather than truncating silently.
 - **Seams order by severity tier, then size.** The README always promised "ordered by what
   blocks what, not by size"; scores had no saturation, so on ActivityPub one `moderate` seam
   outranked twenty-six blockers.
