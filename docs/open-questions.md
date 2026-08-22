@@ -120,9 +120,15 @@ D1 (see blind-spots #11).
 
 ### 5. Is the boundary between script and agent in the right place?
 
-> **Partly resolved.** The hardcoded severity prose is still frozen in `analyze_domain.rb` — see
-> the note at the end of this entry. What did move: the ranking arithmetic (Q6) and both agent
-> dispatch triggers (Q7, Q8).
+> **Partly resolved.** What moved: the ranking arithmetic (Q6) and both agent dispatch triggers
+> (Q7, Q8). The seam prose is no longer frozen either — `Targets` (Q12) overrides `severity`,
+> `break_with` and `why` per destination in one post-processing pass over the ranked seams.
+>
+> Still open, and the mechanism to fix it now exists: that pass varies the prose by *target*,
+> not by *evidence*. The original complaint stands — "constantized strings break at runtime, in
+> production" was attached to 8 `class_name:` options for which it is false. The same hook that
+> takes a target could take the seam's own citations and pick wording that fits what they
+> actually are.
 
 The split is mostly excellent and worth keeping as a reference design: **parsing and graph math are
 deterministic; boundary judgment and call-site interpretation are agents.** Ripper tokenizing is
