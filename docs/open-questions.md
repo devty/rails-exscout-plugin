@@ -12,19 +12,26 @@ Ordered roughly by how hard they are to answer well.
 
 ### 1. What is the false-positive rate, and is it measured anywhere?
 
-> **Partly resolved — the mechanism is in, the corpus is not.**
+> **Resolved.**
 >
-> `--diagnose` reports constant-resolution rates across the whole index and exits non-zero
-> when associations fall below a 90% floor. That is the generalising half of this question:
-> it needs no labels, runs on any repo, and on DocuSeal would have read 84.7% while the
-> whole suite was green. `test/corpus.rb` runs those baselines against pinned real apps and
-> reports what it skipped rather than passing silently.
+> `--diagnose` reports constant-resolution rates across the whole index and exits non-zero when
+> associations fall below a 90% floor, plus a second tripwire that needs no references at all:
+> under Zeitwerk a booting app cannot declare a constant its path does not imply.
 >
-> Still open, and it is the important half: `test/corpus.json` pins exactly one repo, and it
-> is the repo D1–D6 were found in. That makes it a regression guard, not a validation set.
-> A second and third app — ideally ones nobody has tuned against — is what would turn this
-> into evidence the fixes generalise. Adding one is: clone, pin the ref, run `--diagnose`,
-> hand-check the unresolved examples, record the baseline.
+> `test/corpus.json` now pins four apps rather than one — DocuSeal, Mastodon (248 models, custom
+> acronyms, AMS serializers), Solidus (engine monorepo) and Chatwoot (flat app with an enterprise
+> overlay). Every unresolved association was hand-checked against the source, which is the step
+> that turns a number into evidence.
+>
+> The answer to the original question, measured: **nine defects in an afternoon**, none of which
+> the unit suite could have found, because each was a shape the synthetic fixtures did not
+> contain. Mastodon 73% → 95%, Solidus 54% → 95%. Chatwoot passed at 97% on first contact
+> without any change, which is the closest thing here to evidence the fixes generalise — it is
+> the one repo nothing was tuned against.
+>
+> Remaining honest caveat: four apps is a corpus, not a distribution. Every one is a well-known
+> open-source Rails app, and none is a private enterprise monolith of the kind this tool is
+> actually aimed at.
 
 Measured on this one repo, before the fixes: cycle detection **1 of 1 false**; `string_coupling`
 **8 of 22 false**; association edges **18 of 118 silently dropped**. After D1–D6: no known false

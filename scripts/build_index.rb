@@ -95,10 +95,25 @@ module ExtractScout
       end.join
     end
 
+    def all_irregular
+      IRREGULAR_SINGULAR.merge(config[:irregular])
+    end
+
     def singularize(word)
       return word if config[:uncountable].include?(word)
-      return config[:irregular][word] if config[:irregular].key?(word)
-      return IRREGULAR_SINGULAR[word] if IRREGULAR_SINGULAR.key?(word)
+
+      table = all_irregular
+      return table[word] if table.key?(word)
+
+      # ActiveSupport applies irregular rules as suffix patterns, not whole-word
+      # ones: preview_cards_statuses singularizes to preview_cards_status, and a
+      # whole-word table returns preview_cards_statuse. The underscore boundary
+      # is what stops 'gratuses' matching the 'statuses' rule.
+      table.each do |plural_form, singular_form|
+        next unless word.end_with?("_#{plural_form}")
+
+        return "#{word[0...-plural_form.length]}#{singular_form}"
+      end
 
       case word
       when /(.*[^aeiou])ies\z/          then "#{Regexp.last_match(1)}y"
@@ -126,21 +141,33 @@ module ExtractScout
   #
   # Read with Ripper rather than regex, so a commented-out rule is not a rule.
   module InflectionRules
-    SOURCES = [
-      'config/initializers/inflections.rb',
-      'config/initializers/zeitwerk.rb',
-      'config/initializers/inflectors.rb'
+    # Rules are not only in the app's own config/initializers. Solidus declares
+    # `acronym "RMA"` in core/config/initializers -- a GEM's initializers -- and
+    # `acronym "UI"` inside admin/lib/solidus_admin/engine.rb. Any initializer
+    # may declare them, so the globs are wide and the cheap substring check
+    # below keeps the cost to one read per candidate.
+    SOURCE_GLOBS = [
+      'config/initializers/*.rb',
+      '*/config/initializers/*.rb',
+      'engines/*/config/initializers/*.rb',
+      'lib/**/engine.rb',
+      '*/lib/**/engine.rb'
     ].freeze
 
     module_function
 
     def load(repo_root)
       found = { acronyms: [], irregular: {}, uncountable: [], overrides: {} }
-      SOURCES.each do |rel|
-        abs = File.join(repo_root, rel)
-        next unless File.file?(abs)
+      SOURCE_GLOBS.each do |glob|
+        Dir.glob(File.join(repo_root, glob)).sort.each do |abs|
+          next unless File.file?(abs)
 
-        merge!(found, extract(File.read(abs)))
+          source = File.read(abs)
+          # Cheap gate: only the handful of files that mention it get lexed.
+          next unless source.include?('inflect')
+
+          merge!(found, extract(source))
+        end
       end
       found
     rescue StandardError
@@ -176,12 +203,28 @@ module ExtractScout
         when 'uncountable' then out[:uncountable] |= strings
         when 'irregular'
           out[:irregular][strings[1]] = strings[0] if strings.size >= 2
+        when 'singular'
+          # inflect.singular 'data', 'data' -- states the singular form directly,
+          # and overrides our own table, which says data -> datum.
+          out[:irregular][strings[0]] = strings[1] if strings.size >= 2
         when 'inflect'
-          # inflect("html_parser" => "HTMLParser", ...) -- pairs, not a single arg
+          # Two different things are spelled `inflect`. The Zeitwerk override is
+          # a CALL -- inflector.inflect("html_parser" => "HTMLParser"). The other
+          # is the block variable in an inflections block, where `inflect` is a
+          # RECEIVER: inflect.singular 'data', 'data'. Only the call carries
+          # camelize overrides, and a receiver is followed by a period.
+          next if receiver?(tokens, i)
+
           strings.each_slice(2) { |k, v| out[:overrides][k] = v if k && v }
         end
       end
       out
+    end
+
+    def receiver?(tokens, i)
+      j = i + 1
+      j += 1 while j < tokens.length && %i[on_sp on_nl on_ignored_nl].include?(tokens[j][1])
+      j < tokens.length && tokens[j][1] == :on_period
     end
 
     # Ripper never yields a comment's contents as :on_tstring_content, so a
@@ -209,6 +252,8 @@ module ExtractScout
   # why app/models/billing/invoice.rb is Billing::Invoice and not
   # App::Models::Billing::Invoice.
   class AutoloadRoots
+    GEM_EXCLUDED_SEGMENTS = %w[spec test tmp vendor node_modules dummy].freeze
+
     def initialize(repo_root)
       @repo_root = repo_root
       @roots = discover
@@ -218,8 +263,14 @@ module ExtractScout
 
     def discover
       found = []
-      # app/<subdir> for the main app and for every engine/pack/component
-      %w[app engines/*/app packs/*/app components/*/app lib/*/app].each do |glob|
+      # app/<subdir> for the main app and for every engine/pack/component.
+      #
+      # gem_app_globs picks up engine monorepos, where each gem sits in a
+      # top-level directory of its own -- Solidus is core/, api/, admin/,
+      # backend/ and so on. Matching only the engines|packs|components names
+      # found zero roots there, and 1204 files were indexed with no constants at
+      # all. A .gemspec is the marker that says "this directory is a gem".
+      (%w[app engines/*/app packs/*/app components/*/app lib/*/app] + gem_app_globs).each do |glob|
         Dir.glob(File.join(@repo_root, glob, '*')).each do |dir|
           found << dir if File.directory?(dir)
         end
@@ -230,14 +281,53 @@ module ExtractScout
           found << dir if File.directory?(dir)
         end
       end
-      # lib/ is an autoload root in many apps
-      %w[lib engines/*/lib packs/*/lib components/*/lib].each do |glob|
-        Dir.glob(File.join(@repo_root, glob)).each do |dir|
-          found << dir if File.directory?(dir)
+      # lib/ is an autoload root only when the app opts in. Rails 7+ does not
+      # autoload it by default, and a lib/ that is NOT autoloaded typically
+      # holds gem monkey-patches: lib/paperclip/url_generator_extensions.rb
+      # reopens Paperclip, it does not define Paperclip::UrlGeneratorExtensions.
+      # Assuming the root invents a constant per file and then reports each one
+      # as a missing inflection rule.
+      if autoloads_lib?
+        %w[lib engines/*/lib packs/*/lib components/*/lib].each do |glob|
+          Dir.glob(File.join(@repo_root, glob)).each do |dir|
+            found << dir if File.directory?(dir)
+          end
         end
       end
       # Longest first so the most specific root wins.
       found.uniq.sort_by { |d| -d.length }
+    end
+
+    # Directories holding a .gemspec, as app-relative globs. Excluded segments
+    # keep a gem's own spec/dummy harness from registering as application code.
+    def gem_app_globs
+      Dir.glob(File.join(@repo_root, '*', '*.gemspec')).filter_map do |spec|
+        rel = File.dirname(spec).delete_prefix("#{@repo_root}/")
+        next if rel.split('/').any? { |seg| GEM_EXCLUDED_SEGMENTS.include?(seg) }
+
+        "#{rel}/app"
+      end.uniq
+    end
+
+    # Read with Ripper so a commented-out `config.autoload_lib` -- which is how
+    # the line ships in a generated Rails app -- is not mistaken for an opt-in.
+    def autoloads_lib?
+      return @autoloads_lib unless @autoloads_lib.nil?
+
+      @autoloads_lib = Dir.glob(File.join(@repo_root, 'config', 'application.rb')).any? do |cfg|
+        tokens = begin
+          Ripper.lex(File.read(cfg))
+        rescue StandardError
+          nil
+        end
+        next false if tokens.nil?
+
+        idents = tokens.select { |(_p, type, _v)| type == :on_ident }.map { |t| t[2] }
+        next true if idents.include?('autoload_lib')
+
+        (idents & %w[autoload_paths eager_load_paths]).any? &&
+          tokens.any? { |(_p, type, v)| type == :on_tstring_content && v.to_s.split('/').include?('lib') }
+      end
     end
 
     # Returns the fully-qualified constant Zeitwerk would autoload from this path,
@@ -248,6 +338,93 @@ module ExtractScout
 
       rel = abs_path.delete_prefix("#{root}/").delete_suffix('.rb')
       rel.split('/').map { |seg| Inflect.camelize(seg) }.join('::')
+    end
+  end
+
+  # ------------------------------------------------------------ with_options
+  #
+  # `with_options class_name: 'Account' do ... end` applies the override to every
+  # association in the block. That is D1's cousin: the override is not on the
+  # macro's line, nor on a continuation of it, but on an enclosing block, and
+  # every association inside inherits it. Missing it fabricates one constant per
+  # association, each resolving to nothing.
+  #
+  # Ripper.lex cannot see block structure, so this takes one Ripper.sexp pass,
+  # gated on the string appearing at all -- a file without with_options pays
+  # only a substring check.
+  module WithOptions
+    module_function
+
+    # => { line_number => class_name }
+    def scan(source)
+      return {} unless source.include?('with_options')
+
+      tree = begin
+        Ripper.sexp(source)
+      rescue StandardError
+        nil
+      end
+      return {} if tree.nil?
+
+      out = {}
+      walk(tree, nil, out)
+      out
+    end
+
+    def walk(node, inherited, out)
+      return unless node.is_a?(Array)
+
+      if node[0] == :method_add_block
+        name, = call_info(node[1])
+        if name == 'with_options'
+          walk(node[2], class_name_in(node[1]) || inherited, out)
+          return
+        end
+      end
+
+      if inherited
+        name, line = call_info(node)
+        out[line] = inherited if line && ASSOCIATION_MACROS.include?(name)
+      end
+
+      node.each { |child| walk(child, inherited, out) }
+    end
+
+    # Handles `belongs_to :x` (:command) and `belongs_to(:x)` (:method_add_arg).
+    def call_info(node)
+      return [nil, nil] unless node.is_a?(Array)
+
+      ident =
+        case node[0]
+        when :command then node[1]
+        when :method_add_arg
+          node[1].is_a?(Array) && node[1][0] == :fcall ? node[1][1] : nil
+        end
+      return [nil, nil] unless ident.is_a?(Array) && ident[0] == :@ident
+
+      [ident[1], ident[2].is_a?(Array) ? ident[2][0] : nil]
+    end
+
+    def class_name_in(node)
+      found = nil
+      visit = lambda do |n|
+        return if found
+        return unless n.is_a?(Array)
+
+        if n[0] == :assoc_new && n[1].is_a?(Array) && n[1][0] == :@label && n[1][1] == 'class_name:'
+          found = string_value(n[2])
+        end
+        n.each { |c| visit.call(c) }
+      end
+      visit.call(node)
+      found
+    end
+
+    def string_value(node)
+      return nil unless node.is_a?(Array) && node[0] == :string_literal
+
+      content = node[1].is_a?(Array) ? node[1][1] : nil
+      content[1] if content.is_a?(Array) && content[0] == :@tstring_content
     end
   end
 
@@ -274,11 +451,16 @@ module ExtractScout
   CONST_SHAPE         = /\A[A-Z][A-Za-z0-9_]*(::[A-Z][A-Za-z0-9_]*)*\z/.freeze
 
   class FileAnalyzer
+    # Files whose has_many/has_one/belongs_to declare serialized attributes
+    # rather than ActiveRecord associations.
+    SERIALIZER_DIRS = %w[serializers presenters representers].freeze
+
     def initialize(path, source)
       @path = path
       @source = source
       @defines = []
       @refs = []
+      @with_options = WithOptions.scan(source)
       # Token indices of string literals already consumed as a `class_name:`
       # value. Without this the override string is re-detected by
       # maybe_dsl_string as a phantom coupling on its own line, which dedupe!
@@ -328,7 +510,17 @@ module ExtractScout
           end
         when :on_const
           const, consumed = read_const_path(tokens, i)
-          @refs << Ref.new(const: const, line: line, kind: 'reference') if const
+          if const
+            # `EligibilityResult = Struct.new(...)` defines a constant just as a
+            # class keyword does. Recording it as a reference instead made the
+            # file look like it declared only its enclosing module, which the
+            # name-mismatch tripwire then blamed on a missing inflection rule.
+            if constant_assignment?(tokens, i + consumed)
+              @defines << { 'const' => const, 'line' => line }
+            else
+              @refs << Ref.new(const: const, line: line, kind: 'reference')
+            end
+          end
           i += consumed
           next
         when :on_tstring_content
@@ -339,8 +531,25 @@ module ExtractScout
       end
 
       emit_through_edges
+
+      # ActiveModel::Serializer reuses the association macro names for
+      # serialized attributes: `has_one :object, serializer: FollowSerializer`
+      # declares an attribute, and there is no Object model. On Mastodon this
+      # was 105 of 153 unresolved associations. The real dependency -- the
+      # serializer named in the option -- is already recorded by the constant
+      # scanner, so dropping these loses nothing.
+      @refs.reject! { |r| r.kind == 'association' } if serializer_context?
+
       dedupe!
       self
+    end
+
+    def serializer_context?
+      return true if @path.to_s.split('/').any? { |seg| SERIALIZER_DIRS.include?(seg) }
+
+      @refs.any? do |r|
+        r.kind == 'superclass' && r.const.split('::').last.end_with?('Serializer')
+      end
     end
 
     private
@@ -368,6 +577,13 @@ module ExtractScout
     def significant?(type)
       ![:on_sp, :on_nl, :on_ignored_nl, :on_comment, :on_embdoc,
         :on_embdoc_beg, :on_embdoc_end].include?(type)
+    end
+
+    # A single `=` immediately after the constant path. `==`, `=>` and `||=` are
+    # distinct token values, so an exact match tells them apart.
+    def constant_assignment?(tokens, after)
+      j = nxt(tokens, after)
+      j < tokens.length && tokens[j][1] == :on_op && tokens[j][2] == '='
     end
 
     # Index of the next significant token at or after i.
@@ -421,6 +637,11 @@ module ExtractScout
 
     def handle_definition(tokens, i, line)
       j = nxt(tokens, i + 1)
+      # `class ::Spree::Foo` reopens a class from inside a namespace without
+      # relative resolution. Skip the leading `::` so the definition is seen --
+      # missing it dropped the class entirely and left the file appearing to
+      # declare only whatever constant it assigned next.
+      j = nxt(tokens, j + 1) if j < tokens.length && tokens[j][1] == :on_op && tokens[j][2] == '::'
       # `class << self` and anonymous `Class.new` forms have no const here.
       return i + 1 unless j < tokens.length && tokens[j][1] == :on_const
 
@@ -432,6 +653,10 @@ module ExtractScout
       k = nxt(tokens, after)
       if k < tokens.length && tokens[k][1] == :on_op && tokens[k][2] == '<'
         m = nxt(tokens, k + 1)
+        # `class Foo < ::Spree::Base` -- same leading `::` as the definition
+        # side. Without this the parent is still seen, but as a plain reference
+        # rather than a superclass edge, which ranks differently in the seams.
+        m = nxt(tokens, m + 1) if m < tokens.length && tokens[m][1] == :on_op && tokens[m][2] == '::'
         if m < tokens.length && tokens[m][1] == :on_const
           sup, sup_consumed = read_const_path(tokens, m)
           @refs << Ref.new(const: sup, line: tokens[m][0][0], kind: 'superclass')
@@ -473,7 +698,10 @@ module ExtractScout
         return k + 1
       end
 
-      const = opts[:class_name] || Inflect.association_constant(name, plural: plural)
+      # An explicit class_name on the macro itself is more specific than one
+      # inherited from an enclosing with_options block, so it wins.
+      const = opts[:class_name] || @with_options[line] ||
+              Inflect.association_constant(name, plural: plural)
       @refs << Ref.new(const: const, line: line, kind: 'association')
 
       if opts[:as]

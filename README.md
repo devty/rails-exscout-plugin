@@ -405,9 +405,26 @@ do not. It exits non-zero when a kind drops below its floor. On DocuSeal that nu
 **84.7% while every test was green** — it is the check that would have caught the worst defect
 the day it was written.
 
-`test/corpus.rb` runs those baselines against real Rails apps pinned in `test/corpus.json`. It
-clones nothing: it reports what is missing, prints the command to fetch it, and says how many
-repos it actually checked, so a skipped corpus never reads as a passing one.
+`test/corpus.rb` runs those baselines against four real Rails apps pinned in `test/corpus.json`
+— DocuSeal, Mastodon, Solidus and Chatwoot, chosen to stress different conventions. It clones
+nothing: it reports what is missing, prints the command to fetch it, and says how many repos it
+actually checked, so a skipped corpus never reads as a passing one.
+
+| repo | shape | association resolution |
+|---|---|---|
+| Mastodon | 248 models, 18 custom acronyms, AMS serializers throughout | 73% → **95%** |
+| Solidus | engine monorepo, seven gems each with its own `app/` | 54% → **95%** |
+| Chatwoot | flat app with an `enterprise/` overlay | **97%** on first contact |
+
+Chatwoot is the important row: it is the one the tool was never tuned against, and it passed
+without changes. The other two produced nine defects between them in an afternoon — serializer
+macros counted as ActiveRecord associations, `with_options class_name:` ignored, compound
+irregular plurals, `lib/` assumed autoloaded, engine monorepos resolving to *zero* roots,
+inflections declared in a gem's own initializers, constant assignments not counted as
+definitions, and `class ::Foo::Bar` not recognised at all.
+
+Every one of them passed the unit suite. That is the argument for a corpus in one sentence: a
+synthetic fixture can only contain the cases someone thought of.
 
 ```bash
 EXTRACT_SCOUT_CORPUS=~/corpus ruby test/corpus.rb

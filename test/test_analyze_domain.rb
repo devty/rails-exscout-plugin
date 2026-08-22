@@ -237,7 +237,7 @@ class TestAnalyzeDomain < Minitest::Test
         end
       end
     RB
-    'lib/ledger/report.rb' => <<~RB,
+    'app/services/ledger/report.rb' => <<~RB,
       module Ledger
         class Report
           def run
@@ -246,7 +246,7 @@ class TestAnalyzeDomain < Minitest::Test
         end
       end
     RB
-    'lib/ledger/secret.rb' => <<~RB
+    'app/services/ledger/secret.rb' => <<~RB
       module Ledger
         module Secret
           def self.generate = 'x'
