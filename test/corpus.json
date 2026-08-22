@@ -21,7 +21,12 @@
       "ref": "004a22c1",
       "measured_at": "2026-08-21",
       "notes": "Rails 7, 304 files, 34 models. The repo D1-D6 were found in, so its numbers are the weakest evidence the fixes generalise -- a regression guard, not a validation set.",
-      "expect": { "files_indexed_min": 250, "association_total_min": 120, "association_rate_min": 0.90 }
+      "expect": {
+        "files_indexed_min": 250,
+        "association_total_min": 120,
+        "association_rate_min": 0.9,
+        "name_mismatch_max": 0
+      }
     },
     {
       "name": "mastodon",
@@ -29,7 +34,12 @@
       "ref": "2f40549d41d77bd4941214e1915074d2e9113b80",
       "measured_at": "2026-08-22",
       "notes": "Rails 8, 248 models, 18 custom acronyms, ActiveModel::Serializer throughout. Found F1 (serializer macros), F2 (with_options), F3 (compound irregulars), F5 (lib/ not autoloaded). Measured 95% after fixes: the 21 remaining are 6 Doorkeeper gem models and 15 deliberate has_many :through far-end guesses.",
-      "expect": { "files_indexed_min": 1400, "association_total_min": 380, "association_rate_min": 0.90 }
+      "expect": {
+        "files_indexed_min": 1400,
+        "association_total_min": 380,
+        "association_rate_min": 0.9,
+        "name_mismatch_max": 0
+      }
     },
     {
       "name": "solidus",
@@ -37,7 +47,12 @@
       "ref": "1f5bf5c638f5fe9fbda4d480bdb7ebcfa39a9a5e",
       "measured_at": "2026-08-22",
       "notes": "Engine monorepo -- seven gems, each with its own app/ and gemspec. Found F6 (gemspec-marked engine roots: this resolved to ZERO autoload roots before), F7 (inflections in a gem's initializers and inside engine.rb), F8 (constant assignment as definition), F9 (root-scoped `class ::Foo::Bar`). Went 54% -> 95%.",
-      "expect": { "files_indexed_min": 1150, "association_total_min": 420, "association_rate_min": 0.90 }
+      "expect": {
+        "files_indexed_min": 1150,
+        "association_total_min": 420,
+        "association_rate_min": 0.9,
+        "name_mismatch_max": 0
+      }
     },
     {
       "name": "chatwoot",
@@ -45,7 +60,38 @@
       "ref": "6154aebcfea1fe62e8dd01fbf94568ef827fc51c",
       "measured_at": "2026-08-22",
       "notes": "Flat Rails app with an enterprise/ overlay added via eager_load_paths. The only corpus repo that passed on first contact, at 97% -- which is the point of having one the tool was not tuned against. Its enterprise/app/** paths are still not read; see open-questions Q4.",
-      "expect": { "files_indexed_min": 1300, "association_total_min": 350, "association_rate_min": 0.90 }
+      "expect": {
+        "files_indexed_min": 1300,
+        "association_total_min": 350,
+        "association_rate_min": 0.9,
+        "name_mismatch_max": 0
+      }
+    },
+    {
+      "name": "discourse",
+      "clone": "https://github.com/discourse/discourse",
+      "ref": "36698aae084678151dffa875d49c8d59216d2733",
+      "measured_at": "2026-08-22",
+      "notes": "44 plugins under plugins/<name>/ marked by plugin.rb, each with its own app/; a custom path-dependent Zeitwerk inflector; explicit autoloader ignore directives. Found F10 (plugin.rb as a root marker -- 107 unresolved associations), F11 (a qualified declaration beats a conflicting path), F12 (Zeitwerk ignore). Went 85% -> 97%. The 5 remaining name mismatches are genuine: a file reopening Discourse, and plugin jobs whose class names do not match their paths.",
+      "expect": {
+        "files_indexed_min": 4800,
+        "association_total_min": 950,
+        "association_rate_min": 0.9,
+        "name_mismatch_max": 8
+      }
+    },
+    {
+      "name": "decidim",
+      "clone": "https://github.com/decidim/decidim",
+      "ref": "8b1eb46684848a2f2940a9b8d1cc8e2de8acd32e",
+      "measured_at": "2026-08-22",
+      "notes": "Engine monorepo of 28 gems, 3899 indexed files, heavy mixin use (2236 mixin edges). Passed at 96% on first contact with no changes -- the second repo to do so, after Chatwoot.",
+      "expect": {
+        "files_indexed_min": 3700,
+        "association_total_min": 380,
+        "association_rate_min": 0.9,
+        "name_mismatch_max": 0
+      }
     }
   ]
 }

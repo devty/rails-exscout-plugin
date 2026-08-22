@@ -273,6 +273,80 @@ module ExtractScout
     end
   end
 
+  # ---------------------------------------------------------- autoload ignores
+  #
+  # Zeitwerk lets an app exclude paths from autoloading, and apps use it for
+  # exactly the files that break the path-to-constant rule: Discourse's
+  # lib/freedom_patches/ reopens gem classes rather than defining constants named
+  # after their paths. Not reading the directive invents a constant per file and
+  # then blames the mismatch on an inflection rule.
+  module AutoloadIgnores
+    module_function
+
+    def load(repo_root)
+      paths = []
+      globs = InflectionRules::SOURCE_GLOBS + ['config/application.rb']
+      globs.uniq.each do |glob|
+        Dir.glob(File.join(repo_root, glob)).sort.each do |abs|
+          src = begin
+            File.read(abs, encoding: 'UTF-8')
+          rescue StandardError
+            next
+          end
+          next unless src.include?('ignore')
+
+          paths |= extract(src)
+        end
+      end
+      paths
+    end
+
+    def extract(source)
+      tokens = begin
+        Ripper.lex(source)
+      rescue StandardError
+        nil
+      end
+      return [] if tokens.nil?
+
+      out = []
+      tokens.each_with_index do |tok, i|
+        _pos, type, value = tok
+        next unless type == :on_ident || type == :on_label
+
+        # `ignore("lib/tasks", "lib/freedom_patches")` -- paths as given.
+        out |= strings_in_call(tokens, i) if type == :on_ident && value == 'ignore'
+        # `autoload_lib(ignore: %w[tasks generators])` -- names relative to lib/.
+        if type == :on_label && value == 'ignore:'
+          out |= strings_in_call(tokens, i).map { |w| "lib/#{w}" }
+        end
+      end
+      out
+    end
+
+    # Reads string contents to the end of the bracketed argument list, so a call
+    # wrapped over many lines is read whole and the scan stops at its close
+    # rather than running on into whatever follows.
+    def strings_in_call(tokens, start)
+      found = []
+      depth = 0
+      j = start + 1
+      while j < tokens.length
+        _pos, type, value = tokens[j]
+        case type
+        when :on_lparen, :on_lbracket, :on_words_beg, :on_qwords_beg then depth += 1
+        when :on_rparen, :on_rbracket, :on_words_end, :on_qwords_end
+          depth -= 1
+          break if depth <= 0
+        when :on_tstring_content then found << value
+        when :on_nl, :on_ignored_nl then break if depth <= 0
+        end
+        j += 1
+      end
+      found
+    end
+  end
+
   # ------------------------------------------------------------ path -> const
 
   # Rails autoload roots. Every subdirectory of app/ is its own root, which is
@@ -283,10 +357,19 @@ module ExtractScout
 
     def initialize(repo_root)
       @repo_root = repo_root
+      @ignored = AutoloadIgnores.load(repo_root)
       @roots = discover
     end
 
     attr_reader :roots
+
+    def ignored?(abs_path)
+      return false if @ignored.empty?
+
+      rel = abs_path.delete_prefix("#{@repo_root}/")
+      @ignored.any? { |pat| rel == pat || rel.start_with?("#{pat}/") }
+    end
+
 
     def discover
       found = []
@@ -327,8 +410,15 @@ module ExtractScout
 
     # Directories holding a .gemspec, as app-relative globs. Excluded segments
     # keep a gem's own spec/dummy harness from registering as application code.
+    # A gemspec marks a gem; a plugin.rb marks a Discourse plugin. Both say "this
+    # directory is a self-contained unit whose app/ subdirectories are autoload
+    # roots". Discourse ships 44 plugins and none has a gemspec, so matching only
+    # gemspecs left plugins/chat/app/models unregistered and Chat::Channel
+    # resolving to nothing -- 107 unresolved associations.
     def gem_app_globs
-      Dir.glob(File.join(@repo_root, '*', '*.gemspec')).filter_map do |spec|
+      markers = Dir.glob(File.join(@repo_root, '*', '*.gemspec')) +
+                Dir.glob(File.join(@repo_root, '*', '*', 'plugin.rb'))
+      markers.filter_map do |spec|
         rel = File.dirname(spec).delete_prefix("#{@repo_root}/")
         next if rel.split('/').any? { |seg| GEM_EXCLUDED_SEGMENTS.include?(seg) }
 
@@ -360,6 +450,8 @@ module ExtractScout
     # Returns the fully-qualified constant Zeitwerk would autoload from this path,
     # or nil if the file sits outside every autoload root.
     def constant_for(abs_path)
+      return nil if ignored?(abs_path)
+
       root = @roots.find { |r| abs_path.start_with?("#{r}/") }
       return nil unless root
 
@@ -957,7 +1049,24 @@ module ExtractScout
         # A booting Rails app guarantees these agree, so a mismatch is itself a
         # finding worth surfacing.
         declared = analyzer.defines.map { |d| d['const'] }
-        primary = path_const || declared.first
+        # Normally the path is authoritative -- it is how Zeitwerk finds the
+        # constant. But an app may install a custom inflector whose logic we
+        # cannot model: Discourse's is path-dependent, mapping the directory
+        # `onceoff` to Jobs while the file `onceoff.rb` maps to Onceoff, which
+        # our per-segment application turned into Jobs::Jobs.
+        #
+        # A compact-style declaration -- `class Jobs::Onceoff` -- is unambiguous
+        # ground truth from the source, so when one disagrees with the path it
+        # wins. Bare nested names are NOT: `module Billing; class Invoice`
+        # declares Billing and Invoice separately, and neither says anything
+        # about Billing::Invoice.
+        qualified = declared.find { |c| c.include?('::') }
+        primary =
+          if path_const && qualified && qualified != path_const
+            qualified
+          else
+            path_const || declared.first
+          end
 
         files[rel] = {
           'path'          => rel,
