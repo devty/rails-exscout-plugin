@@ -1,0 +1,27 @@
+{
+  "domains": {
+    "Billing": {
+      "enforce": true,
+      "files": [
+        "app/models/billing/invoice.rb",
+        "app/models/billing/calculator.rb",
+        "app/models/billing/tax_engine.rb",
+        "app/controllers/billing/invoices_controller.rb",
+        "app/jobs/billing/invoice_job.rb",
+        "app/models/ledger_entry.rb"
+      ],
+      "constants": ["Billing", "LedgerEntry"]
+    },
+    "Fulfillment": {
+      "enforce": true,
+      "files": [
+        "app/services/fulfillment/packer.rb",
+        "app/services/fulfillment/pick_list.rb",
+        "app/models/order.rb",
+        "app/models/line_item.rb",
+        "app/models/shipment.rb"
+      ],
+      "constants": ["Fulfillment", "Order", "LineItem", "Shipment"]
+    }
+  }
+}

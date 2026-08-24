@@ -8,10 +8,11 @@ Field notes on `extract-scout`, written from real runs rather than from the sour
 | [`scope-decisions.md`](scope-decisions.md) | What the tool deliberately refuses to analyze, the evidence for each choice, and the case where it would be wrong. |
 | [`blind-spots.md`](blind-spots.md) | What the tool structurally does not model, split by whether `not_analyzed` discloses it. |
 | [`open-questions.md`](open-questions.md) | Review questions — evaluation methodology, the agent/script split, hook signal-to-noise, product framing. |
+| [`build-your-own-plugin.md`](build-your-own-plugin.md) | The teaching artifact: five decisions for building your own plugin, worked on a non-Rails example. |
 
 ## The corpus
 
-Four apps are pinned in [`../test/corpus.json`](../test/corpus.json) with hand-checked
+Six apps are pinned in [`../test/corpus.json`](../test/corpus.json) with hand-checked
 resolution baselines. Run them with `EXTRACT_SCOUT_CORPUS=~/corpus ruby test/corpus.rb`.
 
 | repo | what it stresses | before → after |
@@ -20,9 +21,11 @@ resolution baselines. Run them with `EXTRACT_SCOUT_CORPUS=~/corpus ruby test/cor
 | [mastodon](https://github.com/mastodon/mastodon) | 18 custom acronyms, AMS serializers | 73% → 95% |
 | [solidus](https://github.com/solidusio/solidus) | engine monorepo, seven gems | 54% → 95% |
 | [chatwoot](https://github.com/chatwoot/chatwoot) | flat app, `enterprise/` overlay | 97%, unchanged |
+| [discourse](https://github.com/discourse/discourse) | 44 plugins marked by `plugin.rb`, path-dependent inflector | 85% → 97% |
+| [decidim](https://github.com/decidim/decidim) | engine monorepo of 28 gems, heavy mixin use | 96%, unchanged |
 
-Chatwoot passing untouched is the only real evidence here that the fixes generalise rather than
-overfit — it is the one repo nothing was tuned against.
+Chatwoot and Decidim passing untouched are the only real evidence here that the fixes generalise
+rather than overfit — they are the repos nothing was tuned against.
 
 ## The short version
 

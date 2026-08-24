@@ -27,6 +27,22 @@ plugin is `0.x`, minor bumps may change behaviour.
 
 ### Added
 
+- **[`docs/build-your-own-plugin.md`](docs/build-your-own-plugin.md)** — the five decisions that
+  made this plugin worth installing, worked end to end on a deliberately non-Rails example, plus
+  the specific ways Claude Code goes wrong while you build one.
+- **A prior-art section in the README.** Every Rails architecture tool in the ecosystem begins
+  after a boundary has been declared; this one answers the question before that, and reads
+  Packwerk rather than competing with it. Worth saying out loud rather than leaving a reader to
+  ask why Packwerk does not already do this.
+- **`example/` — a nineteen-file Rails app, and every sample output in the README is now its
+  real output.** The samples used to come from two different runs and disagreed with each
+  other: the domain report showed Billing at 4 files and 4.1, the portfolio table showed it at
+  2 files and 2.3. Documentation nobody can execute drifts, and this drifted. The app plants
+  one of each claim the README makes — a true cycle, an inverse association pair that is not a
+  cycle, a concern at the `app/*/concerns` root, a lexically-scoped bare constant, a
+  polymorphic `belongs_to`, a facade leak, and a domain member no naming convention reveals —
+  so each is checkable rather than asserted. Full index plus two reports runs in ~0.2s.
+
 - **Ambient infrastructure is set aside before counting.** A constant reached by 10+ units
   whose edges are 90%+ `mixin`/`superclass` is scaffolding, not coupling — reported under
   `AMBIENT` with the numbers that justified it, and excluded from seams and the score. It

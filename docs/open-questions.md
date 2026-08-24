@@ -360,3 +360,19 @@ The risk is that it becomes a place to park things rather than build them. Three
 (schema FKs, transactions, git co-change) are *statically derivable from files already in the repo*.
 At some point "not analyzed" stops reading as honesty and starts reading as a backlog. Worth deciding
 which of the four are permanent scope boundaries and which are TODOs, and saying which is which.
+
+### 14. Does the absence of prior art mean an open gap or thin demand?
+
+A GitHub sweep (2026-08-24) found no tool, gem or plugin that scores extraction cost against a
+repo with no declared boundaries. The Rails architecture cluster — Packwerk (1.9k), packs-rails
+(319), packs (97), graphwerk (59), query_packwerk (3) — begins uniformly *after* a boundary has
+been declared. No Claude Code plugin in the Ruby ecosystem ships an executable analyzer at all;
+the closest structural analogue, `ruby-upgrade-toolkit`, is reference-doc driven.
+
+That is the positioning argument, and it is also the thing to be suspicious of. Packwerk having
+1.9k stars for *enforcement* while nothing exists for *discovery* is at least consistent with
+teams caring about this question far more once they have already decided than while they are
+deciding — in which case the gap is real and the market for it is not.
+
+The counter-evidence, such as it is: every engagement that motivated this tool started from
+"which one, and what will it cost", and none of them had a `package.yml`. One data point.

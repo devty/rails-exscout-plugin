@@ -8,6 +8,56 @@ to break before it can be extracted.
 /extract-compare Billing Inventory Notifications
 ```
 
+## Who this is for
+
+The engineer who owns the answer to *"can we pull Billing out?"* — staff, platform or
+architecture — in a Rails codebase big enough that nobody holds the whole graph in their head
+anymore. If your repo has a `packs/` directory, a two-year-old extraction epic, or the same
+argument in planning every quarter about which domain goes first, this is pointed at you.
+
+It is not a linter and it will not enforce an architecture on you. It measures the one you
+have, cites every claim, and names what it did not look at.
+
+## Try it in five minutes
+
+Needs Claude Code 2.x and `ruby` on `PATH` — any Ruby >= 2.0. `Ripper` is stdlib, so there is
+nothing to `gem install`, no Gemfile to touch, and nothing written into the repo you point it
+at.
+
+```bash
+git clone https://github.com/devty/rails-exscout-plugin
+cd rails-exscout-plugin/example
+claude --plugin-dir ..
+```
+
+Then, in that session:
+
+```
+/extract-scout Billing
+```
+
+`example/` is a nineteen-file Rails app with one true cycle, one inverse association pair that
+only looks like a cycle, and a two-constant facade leak. Every sample output below is real
+output from it — [`example/README.md`](example/README.md) lists what is planted where, so the
+claims are checkable rather than assertions.
+
+No Claude Code handy? The analyzers are the deterministic half and they run on their own:
+
+```bash
+ruby ../scripts/build_index.rb --root . --out /tmp/index.json
+```
+
+```bash
+ruby ../scripts/analyze_domain.rb --index /tmp/index.json --domain Billing
+```
+
+```bash
+ruby ../scripts/analyze_domain.rb --index /tmp/index.json --summary --all
+```
+
+When you point it at your own monolith, `--plugin-dir` is still the fastest way in. To keep it
+across sessions — and to arm the cross-domain hook — see [Install](#install).
+
 ## Why a plugin
 
 Every Rails team eventually asks "can we pull Billing out?" and answers it the same way:
@@ -35,29 +85,62 @@ seen.
 The result is a report an engineer can act on directly, and dispute directly — because the
 boundary, the evidence, and the blind spots are all on the page.
 
+If you want one of these for your own team's recurring question,
+[`docs/build-your-own-plugin.md`](docs/build-your-own-plugin.md) is the five decisions that
+actually mattered here, worked end to end on an example that has nothing to do with Rails.
+
+## Everything else starts after the boundary exists
+
+Rails has good architecture tooling and this does not replace any of it. The overlap looks
+larger than it is, so it is worth being precise about where the line falls:
+
+| | what it does |
+|---|---|
+| [Packwerk](https://github.com/Shopify/packwerk) | Enforces the boundaries you declared in `package.yml` |
+| [packs-rails](https://github.com/rubyatscale/packs-rails) | Conventions for a monolith you have decided to split |
+| [packs](https://github.com/alexevanczuk/packs) | Packwerk in Rust — same semantics, faster |
+| [graphwerk](https://github.com/samuelgiles/graphwerk), [query_packwerk](https://github.com/rubyatscale/query_packwerk) | Draw and query Packwerk's own graph |
+
+Every one of them begins **after** the boundary exists. Packwerk needs a `package.yml` to
+enforce; graphwerk needs Packwerk to draw. That is the right design for what they do — a
+declared boundary is better information than an inferred one, always, and once you have written
+yours down Packwerk is a better tool than this one for keeping them.
+
+`extract-scout` answers the question that comes before all of that: *which domain, and what will
+it cost?* — in a repo where nobody has declared anything yet, which is the state most monoliths
+are actually in and the only state in which the question is still open.
+
+Which is why, when `packs/*/package.yml` exists, this **reads** it rather than competing with
+it: the packs become the candidate domains, and pack membership is the strongest evidence a
+resolution can carry. The team already wrote down the answer this tool otherwise has to infer.
+
 ## What it reports
 
 ```
 DOMAIN: Billing
-Resolved to 4 files (41 LOC)
+Resolved to 5 files of 19 indexed (77 LOC)
 
-ENTANGLEMENT: 4.1/10 -- Moderate, but BLOCKED -- a seam must break before the boundary can be drawn
+TARGET: extraction into a separate Ruby service
 
-  Inbound   #####.....  8 edges from 5 units (5 files)
-  Outbound  #######...  9 edges to 8 units
+ENTANGLEMENT: 3.2/10 -- Moderate, but BLOCKED -- a seam must break before the boundary can be drawn
+
+  Inbound   ###.......  4 edges from 3 units (3 files)
+  Outbound  ####......  8 edges to 5 units
   Facade    ##........  2 domain constants referenced externally
-  Cycles    ###.......  1 true cycle (+3 inverse assoc pairs)
-  Cohesion  ##........  15% of edges stay inside the domain
+  Cycles    ###.......  1 true cycle (+1 inverse assoc pair)
+  Cohesion  ###.......  25% of edges stay inside the domain
 
 WHAT HAS TO BREAK FIRST
 
   1. [BLOCKER] Cycle: Billing <-> Order
-     Order calls into Billing (3 edges) and Billing calls back into Order (2 edges),
+     Order calls into Billing (2 edges) and Billing calls back into Order (4 edges),
      with real behaviour on both sides. Neither can move until this is one-directional.
      Break with: Invert one direction: dependency injection, a domain event, or a
      shared interface both sides depend on.
-       - app/models/order.rb:6  reference  -> Billing::Calculator
+       - app/models/order.rb:5  association  -> Billing::Invoice
+       - app/models/order.rb:12  reference  -> Billing::Calculator
        - app/controllers/billing/invoices_controller.rb:5  reference  -> Order
+       - app/jobs/billing/invoice_job.rb:4  reference  -> Order
 ```
 
 Seams are ordered by **what blocks what**, not by size. Two hundred one-directional call
@@ -75,12 +158,12 @@ ruby scripts/analyze_domain.rb --index index.json --summary --all
 
 ```
 DOMAIN                  SCORE  FILES    IN   OUT  EXPOSED  CYCLES  VERDICT
-Shipping                  0.0      1     0     0        0       0  Clean
-Fulfillment               0.4      1     1     1        1       0  Clean
-Billing                   2.3      2     2     3        2       1  Moderate, BLOCKED
+Fulfillment               0.1      2     0     1        0       0  Clean
+Shipping                  0.4      1     1     0        1       0  Clean
+Billing                   3.2      5     3     5        2       1  Moderate, BLOCKED
 ```
 
-Ordered by ascending cost, with blocking ahead of size — a blocked 2.3 goes after a clean 6.0,
+Ordered by ascending cost, with blocking ahead of size — a blocked 3.2 goes after a clean 6.0,
 because a blocker is a precondition rather than a quantity. `--all` takes every namespace in
 the repo, or every top-level unit in a repo that has none; `--domains-from` takes a list.
 
@@ -345,6 +428,9 @@ scripts/
 test/
   run_all.rb                      # the whole suite
   verdict_matrix.rb               # every (score, severity) headline in one table
+example/                          # 19-file Rails app; the sample output above is its real output
+docs/
+  build-your-own-plugin.md        # the five decisions, worked on a non-Rails example
 ```
 
 The hook `require`s `scripts/build_index.rb`, so it and the audit share one definition of
