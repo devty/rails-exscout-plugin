@@ -543,3 +543,7 @@ the headline reports both: `1.7/10 -- Clean, but BLOCKED`. Collapsing them is ho
 earlier build managed to print "Clean — extractable as-is" directly above `[BLOCKER]`.
 
 Adjust these to match how your team actually sequences migration work.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
